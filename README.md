@@ -1,6 +1,6 @@
 # CLEVER — Cluster-Level Eviction for Vector Embedding Retrieval
 
-![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
 Benchmarking and optimization framework for semantic caching in LLM applications.
@@ -113,7 +113,7 @@ CLEVER/
 | Embeddings | `slurm/embed.sbatch` | 1× GPU, 32 GB |
 | Benchmarks | `slurm/benchmark.sbatch` | CPU, 32 GB |
 | Routing | `slurm/routing.sbatch` | CPU, 32 GB |
-| Eviction | `slurm/eviction.sbatch` | 1× GPU (RTX 6000), 32 GB |
+| Eviction | `slurm/eviction.sbatch` | largemem, 16 CPUs, 128 GB |
 
 ## Running Tests
 

@@ -48,6 +48,13 @@ class LFUPolicy(EvictionPolicy):
 
         Among entries tied at the minimum count, evict the first one
         in insertion order (front of the OrderedDict subset).
+
+        Single-pass: ``_counts`` is an ``OrderedDict`` that preserves
+        insertion order, so the first entry encountered at the global
+        minimum count is guaranteed to be the oldest-inserted entry
+        with that count.  We therefore do two logical steps in one
+        loop: (1) find the global minimum, and (2) record the first
+        entry that has it.
         """
         victim_id: Optional[int] = None
         min_count = float("inf")
@@ -59,18 +66,6 @@ class LFUPolicy(EvictionPolicy):
             if cnt < min_count:
                 min_count = cnt
                 victim_id = cid
-                # Don't break — we iterate in insertion order,
-                # so the first match at the minimum count is the
-                # oldest inserted entry with that count.
-                # But we need to check all entries to find the
-                # global minimum count first.
-
-        # Now do a second pass to find the first (oldest) entry
-        # with exactly min_count.
-        if victim_id is not None:
-            for cid in self._counts:
-                if cid in active_ids and self._counts[cid] == min_count:
-                    return cid
 
         return victim_id
 

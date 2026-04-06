@@ -797,9 +797,12 @@ class TestOracleRefresh:
         policy._full_refresh()
 
         # Now entry 0 should have no future use (step 0 is past)
-        # Entry 1 should be used at step 1
-        assert policy._next_use[0] == float("inf") or policy._next_use[0] >= 1
-        assert policy._next_use[1] <= 1 or policy._next_use[1] == float("inf")
+        # Entry 0's step-0 access is now in the past → should be INF
+        # Entry 1's step-1 access is at current pos → should be ≤ 1
+        assert policy._next_use[0] == float("inf"), \
+            f"Entry 0 should have no future use after advancing past step 0, got {policy._next_use[0]}"
+        assert policy._next_use[1] <= 1.0, \
+            f"Entry 1 should have next_use at step 1, got {policy._next_use[1]}"
 
     def test_refresh_after_eviction(self):
         """After evicting an entry, refresh should redistribute its queries."""
@@ -880,6 +883,7 @@ class TestOracleRefresh:
 class TestWorkloadReordering:
     """Test that workload reordering produces valid indices."""
 
+    @pytest.mark.slow
     def test_uniform_workload_valid(self):
         """Uniform workload should produce valid index array."""
         from src.benchmark.workload import generate_workload
@@ -895,6 +899,7 @@ class TestWorkloadReordering:
         assert indices.max() < n, "Index out of bounds"
         assert indices.min() >= 0, "Negative index"
 
+    @pytest.mark.slow
     def test_clustered_workload_valid(self):
         """Clustered workload should produce valid index array."""
         from src.benchmark.workload import generate_workload
@@ -910,6 +915,7 @@ class TestWorkloadReordering:
         assert indices.max() < n
         assert indices.min() >= 0
 
+    @pytest.mark.slow
     def test_bursty_workload_valid(self):
         """Bursty workload should produce valid index array."""
         from src.benchmark.workload import generate_workload
