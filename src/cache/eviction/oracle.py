@@ -65,10 +65,12 @@ class OraclePolicy(EvictionPolicy):
         cache_ids: list[int],
         similarity_threshold: float = 0.90,
         refresh_interval: int = 100,
+        horizon: int = 0,
         use_gpu: bool = False,
     ) -> None:
         self.similarity_threshold = similarity_threshold
         self.refresh_interval = refresh_interval
+        self.horizon = horizon  # 0 = unlimited lookahead
 
         # GPU acceleration for batch search in _full_refresh().
         self._use_gpu = use_gpu
@@ -138,8 +140,16 @@ class OraclePolicy(EvictionPolicy):
 
         # Batch-search remaining stream against active cache.
         remaining = self._stream_embs[self._stream_pos:]
+        if self.horizon > 0:
+            remaining = remaining[:self.horizon]
         n_remaining = len(remaining)
         batch_size = 10_000
+
+        logger.info(
+            f"Oracle refresh #{self._n_refreshes + 1}: "
+            f"{n_remaining} stream queries × {len(active_list)} cache entries"
+            f"{f' (horizon={self.horizon})' if self.horizon > 0 else ''}"
+        )
 
         for batch_start in range(0, n_remaining, batch_size):
             batch_end = min(batch_start + batch_size, n_remaining)
@@ -287,10 +297,22 @@ class OraclePolicy(EvictionPolicy):
     def name(self) -> str:
         return "oracle"
 
+    @property
+    def stats(self) -> dict:
+        """Return oracle-specific statistics."""
+        return {
+            "n_refreshes": self._n_refreshes,
+            "refresh_interval": self.refresh_interval,
+            "horizon": self.horizon,
+            "stream_len": len(self._stream_embs),
+            "active_entries": len(self._active_ids),
+        }
+
     def __repr__(self) -> str:
         return (
             f"OraclePolicy(threshold={self.similarity_threshold}, "
             f"refresh_interval={self.refresh_interval}, "
+            f"horizon={self.horizon}, "
             f"stream_len={len(self._stream_embs)}, "
             f"active={len(self._active_ids)}, "
             f"refreshes={self._n_refreshes})"

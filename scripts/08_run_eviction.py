@@ -130,6 +130,7 @@ def create_policy(
             cache_ids=cache_ids,
             similarity_threshold=config["evaluation"].get("hit_threshold", 0.90),
             refresh_interval=oracle_cfg.get("refresh_interval", 100),
+            horizon=oracle_cfg.get("horizon", 0),
             use_gpu=oracle_cfg.get("use_gpu", False),
         )
     else:
@@ -173,6 +174,44 @@ def reorder_stream(
     reordered_embs = stream_embs[indices]
     reordered_texts = [stream_texts[i] for i in indices]
     return reordered_embs, reordered_texts
+
+
+# ═════════════════════════════════════════════════════════════════
+# Checkpointing
+# ═════════════════════════════════════════════════════════════════
+
+def _ckpt_key(policy: str, cache_pct: float, workload: str, seed: int) -> str:
+    """Unique identifier for a single evaluation run."""
+    return f"{policy}|{cache_pct:.2f}|{workload}|{seed}"
+
+
+def _save_checkpoint(all_results: dict, path: Path) -> None:
+    """Atomically save partial results to disk."""
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(all_results, f, indent=2, default=str)
+    tmp.rename(path)
+    logger.info(f"  ✓ Checkpoint saved → {path}")
+
+
+def _load_checkpoint(path: Path) -> tuple[dict, set[str]]:
+    """Load existing checkpoint and return (results_dict, completed_keys)."""
+    if not path.exists():
+        return {}, set()
+    with open(path) as f:
+        data = json.load(f)
+    completed: set[str] = set()
+    for policy_name, pct_dict in data.items():
+        for pct_key, runs in pct_dict.items():
+            for run in runs:
+                key = _ckpt_key(
+                    policy_name, float(pct_key),
+                    run.get("workload", "temporal"),
+                    run["seed"],
+                )
+                completed.add(key)
+    logger.info(f"Checkpoint loaded: {len(completed)} completed runs from {path}")
+    return data, completed
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -357,12 +396,17 @@ def run_full_experiment(
     config: dict,
     seeds: list[int],
     max_workers: int = 1,
+    checkpoint_path: Path | None = None,
 ) -> dict:
     """Run all policy x cache_size x workload x seed combinations.
 
     All policies run sequentially to avoid pickling issues with
     ProcessPoolExecutor (nested functions / FAISS objects are not
     safely serializable across process boundaries).
+
+    Supports checkpoint/resume: after each run completes, results are
+    saved to ``checkpoint_path``.  On restart, completed runs are
+    skipped automatically.
 
     Returns:
         Dict with nested results and aggregated statistics.
@@ -378,37 +422,77 @@ def run_full_experiment(
     cache_sizes = config["cache"]["cache_sizes_pct"]
     workloads = config["evaluation"].get("workloads", ["temporal"])
 
-    all_results = {}
-    aggregated = {}
+    # ── Load checkpoint (if available) ───────────────────────────
+    if checkpoint_path is not None:
+        all_results, completed_keys = _load_checkpoint(checkpoint_path)
+    else:
+        all_results = {}
+        completed_keys = set()
 
+    aggregated = {}
     total_runs = len(policies) * len(cache_sizes) * len(workloads) * len(seeds)
     run_num = 0
+    n_skipped = 0
+    run_times: list[float] = []
 
-    # Prepare data structure
+    # Prepare data structure (preserve any checkpoint data)
     for policy_name in policies:
-        all_results[policy_name] = {}
+        if policy_name not in all_results:
+            all_results[policy_name] = {}
         aggregated[policy_name] = {}
         for cache_pct in cache_sizes:
             pct_key = f"{cache_pct:.2f}"
-            all_results[policy_name][pct_key] = []
+            if pct_key not in all_results[policy_name]:
+                all_results[policy_name][pct_key] = []
 
     # ── Run all policies sequentially ────────────────────────────
     logger.info(f"Running {total_runs} tasks sequentially...")
+    if completed_keys:
+        logger.info(f"  ({len(completed_keys)} already completed — will skip)")
+
     for policy_name in policies:
         for cache_pct in cache_sizes:
             for workload_type in workloads:
                 for seed in seeds:
                     run_num += 1
+                    key = _ckpt_key(policy_name, cache_pct, workload_type, seed)
+
+                    if key in completed_keys:
+                        n_skipped += 1
+                        logger.info(
+                            f"SKIP {run_num}/{total_runs} "
+                            f"(checkpoint): {key}"
+                        )
+                        continue
+
                     logger.info(
                         f"RUN {run_num}/{total_runs}: "
                         f"policy={policy_name}, cache={cache_pct:.0%}, "
                         f"workload={workload_type}, seed={seed}"
                     )
+                    t_run = time.perf_counter()
                     res = evaluate_policy(
                         policy_name, embeddings, texts, config,
                         cache_pct, seed, workload_type,
                     )
+                    run_time = time.perf_counter() - t_run
+                    run_times.append(run_time)
+
                     all_results[policy_name][f"{cache_pct:.2f}"].append(res)
+
+                    # Progress estimate
+                    remaining = total_runs - run_num
+                    avg_t = sum(run_times) / len(run_times)
+                    eta_h = remaining * avg_t / 3600
+                    logger.info(
+                        f"  ✓ Completed in {run_time/60:.1f} min "
+                        f"| {remaining} runs left "
+                        f"| ETA ~{eta_h:.1f}h"
+                    )
+
+                    # Save checkpoint after each run
+                    if checkpoint_path is not None:
+                        _save_checkpoint(all_results, checkpoint_path)
 
     # ── Aggregation ──────────────────────────────────────────────
     for policy_name in policies:
@@ -524,6 +608,10 @@ def parse_args():
         "--gpu", action="store_true",
         help="Use GPU-accelerated FAISS for oracle batch search (requires faiss-gpu).",
     )
+    parser.add_argument(
+        "--fresh", action="store_true",
+        help="Ignore existing checkpoint and start from scratch.",
+    )
     return parser.parse_args()
 
 
@@ -555,22 +643,37 @@ def main():
     else:
         seeds = [config.get("seed", 42)]
 
+    # Checkpoint setup
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_dir / "checkpoint.json"
+
+    if args.fresh and checkpoint_path.exists():
+        checkpoint_path.unlink()
+        logger.info("Fresh start: removed existing checkpoint")
+
     # Run experiment
     t_start = time.perf_counter()
-    results = run_full_experiment(embeddings, texts, config, seeds, max_workers=args.workers)
+    results = run_full_experiment(
+        embeddings, texts, config, seeds,
+        max_workers=args.workers,
+        checkpoint_path=checkpoint_path,
+    )
     total_time = time.perf_counter() - t_start
 
     results["total_time_s"] = round(total_time, 1)
 
     # Save results
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     suffix = "_multi_seed" if args.multi_seed else ""
     output_file = output_dir / f"eviction_results{suffix}.json"
 
     with open(output_file, "w") as f:
         json.dump(results, f, indent=2, default=str)
+
+    # Clean up checkpoint after successful completion
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+        logger.info("Checkpoint removed (experiment complete)")
 
     logger.info(f"\n{'═' * 60}")
     logger.info(f"RESULTS SAVED → {output_file}")

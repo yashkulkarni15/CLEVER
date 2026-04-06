@@ -12,20 +12,22 @@ cache:
 eviction:
   policies: [lru, lfu, semantic, oracle]
   oracle:
-    refresh_interval: 100             # full future-use rebuild every N evictions
+    refresh_interval: 5000            # full future-use rebuild every N evictions (was 100)
+    horizon: 50000                    # bounded lookahead: only search next 50K stream queries
+                                      # instead of entire remaining stream. 0 = unlimited.
+                                      # Reduces refresh from O(S×C) to O(horizon×C).
   semantic:
     similarity_threshold: 0.30        # L2² threshold (≈ cosine 0.85)
     alpha: 1.0                        # recency weight
     beta: 1.0                         # frequency weight
-    recompute_interval: 1000          # batch-recompute redundancy every N evictions
+    recompute_interval: 5000          # batch-recompute redundancy every N evictions (was 1000)
 
 evaluation:
   warmup_pct: 0.30                    # first 30% of queries warm up the cache
   hit_threshold: 0.90                 # L2² hit threshold for lookup
   rolling_window: 1000               # window size for rolling hit rate
-  log_interval: 500                   # log progress every N queries (was 5000)
+  log_interval: 500                   # log progress every N queries
   workloads: [temporal]               # temporal = chronological order (default)
-                                      # expand to [temporal, clustered, bursty] for HPC
 
 seed: 42
 seeds: [42, 123, 456]
