@@ -869,10 +869,11 @@ class TestOracleRefresh:
             "New entries must NOT get INF or they become immediate eviction victims."
         )
 
-        # Early refresh should be scheduled (counter bumped to refresh_interval - 5)
-        assert policy._evictions_since_refresh >= 95, (
-            f"Expected early refresh scheduled (counter >= 95), "
-            f"got {policy._evictions_since_refresh}"
+        # Refresh counter should NOT be bumped — the protective sentinel
+        # is sufficient; periodic refreshes handle the rest.
+        assert policy._evictions_since_refresh == 0, (
+            f"on_insert should not schedule early refreshes, "
+            f"got counter={policy._evictions_since_refresh}"
         )
 
 

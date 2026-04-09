@@ -211,8 +211,8 @@ class OraclePolicy(EvictionPolicy):
         temporary sentinel.  Since stream_pos < any future index, this entry
         effectively appears as "next used right now" → lowest eviction priority.
 
-        A full refresh is scheduled within ``refresh_interval - 5`` evictions
-        so the real next_use replaces this sentinel quickly.
+        The sentinel is replaced with the real next_use at the next periodic
+        full refresh (governed by ``refresh_interval``).
         """
         self._active_ids.add(cache_id)
         self._cache_embs[cache_id] = embedding.copy()
@@ -221,13 +221,6 @@ class OraclePolicy(EvictionPolicy):
         # Protective sentinel: appears "just accessed", won't be chosen
         # as victim (oracle picks MAX next_use, not MIN).
         self._next_use[cache_id] = float(self._stream_pos)
-
-        # Schedule a full refresh soon so the real next_use is computed
-        # before too many eviction decisions are made with stale data.
-        self._evictions_since_refresh = max(
-            self._evictions_since_refresh,
-            self.refresh_interval - 5,
-        )
 
     def on_evict(self, cache_id: int) -> None:
         """Clean up state and trigger refresh when interval is reached."""
