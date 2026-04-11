@@ -1,37 +1,89 @@
 """
 Semantic-aware eviction policy — the paper's novel contribution.
 
-Scores each cached entry by a ratio of its *redundancy* (how many
-similar entries are nearby) to its *utility* (recency + frequency).
-Entries that are highly redundant and rarely used are evicted first;
-entries that are isolated (no similar neighbours) or heavily used are
-protected.
+Instead of a pure recency/frequency heuristic, each cached entry is
+scored by the *ratio* of its semantic **redundancy** (how many other
+cached entries are nearby in embedding space) to its **utility**
+(recency + frequency).  Entries that are highly redundant and rarely
+used are evicted first; entries that are isolated (no similar
+neighbours) or heavily used are protected.
 
 Eviction score
 --------------
-    score(e) = redundancy(e) / (α·recency(e) + β·frequency(e) + ε)
+::
 
-- ``redundancy(e)``: fraction of active cache entries whose L2²
-  distance to *e* is ≤ ``similarity_threshold``.  High redundancy
-  means evicting *e* won't reduce the cache's topical coverage.
+    score(e) = (r(e) + μ) / (α · recency(e) + β · frequency(e) + ε)
 
-- ``recency(e)``: normalised recency in [0, 1] where 1 = most
-  recently accessed.  Recency is measured by rank in access order.
+where ``r(e) = |neighbours(e)| / max(n_active - 1, 1)``.
 
-- ``frequency(e)``: normalised access count in [0, 1] where 1 = the
-  most frequently accessed entry.
+The ``+ μ`` smoothing in the numerator is a **convex blend** between
+two ranking criteria:
 
-- ``α``, ``β``: tunable weights (default 1.0 each).
+    score(e) = r(e) / u(e)  +  μ · (1 / u(e))
+             = semantic term +  μ · LRU+LFU term
 
-- ``ε``: small constant (1e-9) to avoid division by zero.
+- **μ → 0**   ⇒ pure redundancy-over-utility scoring.
+- **μ → ∞**   ⇒ policy degenerates to plain inverse-utility, i.e.
+  LRU+LFU with the redundancy signal washed out.
 
-Batch optimisation
-------------------
-Computing neighbor counts for every entry on every eviction would be
-O(N²) per eviction.  Instead we **batch-recompute** redundancy scores
-every ``recompute_interval`` evictions using the FAISS index, and
-cache the scores in between.  Between recomputations we update only
-recency and frequency (which are cheap O(1) updates).
+This guarantees the policy never does worse than LRU+LFU when the
+redundancy signal is uninformative — it degrades gracefully instead
+of collapsing (as the un-smoothed ``r / u`` formulation would, since
+any entry with ``r = 0`` had score 0 and was *never evictable*).
+
+Recency floor
+-------------
+``recency(e)`` is defined as ``(rank + 1) / n_active`` rather than
+``rank / max(n-1, 1)``, so recency ∈ [1/n, 1] instead of [0, 1].  This
+prevents the oldest entry from driving the utility denominator to
+exactly ε, which previously caused that entry's score to explode
+(≈ r / 1e-9) and dominate the selection regardless of redundancy.
+
+Incremental redundancy maintenance
+----------------------------------
+The neighbour graph is stored explicitly as a symmetric set-of-sets:
+``_neighbors[cid] ⊆ active_ids``.  This enables O(S) online maintenance
+instead of O(N²) per-eviction recomputation:
+
+- ``on_insert(e)``: sample S ≤ 1024 active entries, compute distances
+  to *e* once, and **symmetrically** add edges for every (e, j) pair
+  within the threshold.  Both ``_neighbors[e]`` and ``_neighbors[j]``
+  are updated so the graph stays consistent.
+
+- ``on_evict(x)``: remove ``x`` from every ``_neighbors[j]`` in
+  ``_neighbors[x]`` (again, symmetric).  O(|neighbours of x|).
+
+- ``_recompute_redundancy`` (called every ``recompute_interval``
+  evictions): rebuild the graph from scratch using a sampled anchor
+  set, to correct for sampling bias that accumulates between
+  recomputations.  GPU-accelerated (PyTorch) if available.
+
+This "incremental symmetric redundancy graph" is the novel systems
+contribution: the cache's redundancy state is always fresh and
+consistent, with amortised O(S) cost per insert/evict instead of the
+naive O(N²) recomputation every step.
+
+Parameters
+----------
+similarity_threshold
+    L2² distance threshold for counting an entry as a "neighbour".
+    For unit-norm embeddings, ``cosine_sim ≈ 1 - L2²/2``, so
+    ``L2² ≤ 0.30`` corresponds to ``cosine_sim ≥ 0.85``.
+alpha, beta
+    Weights on the recency and frequency components of utility.
+mu
+    Eventual-evictability smoothing constant.  Blends semantic
+    scoring with plain LRU+LFU.  Default 0.1.
+dynamic_impute
+    If True, run the sampled symmetric update on every insert.  If
+    False, new entries start with an empty neighbour set and rely on
+    the next batch recomputation to populate it.
+recompute_interval
+    Number of evictions between full batch rebuilds of the neighbour
+    graph.  Lower = fresher but more expensive.
+seed
+    Base seed for the imputation RNG.  Mixed with ``cache_id`` so
+    different run seeds produce honestly independent samples.
 """
 
 import logging
@@ -47,18 +99,7 @@ logger = logging.getLogger(__name__)
 
 
 class SemanticPolicy(EvictionPolicy):
-    """Semantic-aware eviction policy.
-
-    Args:
-        similarity_threshold: L2² distance threshold for counting an
-            entry as a "neighbour".  For normalised embeddings,
-            ``cosine_sim ≈ 1 - L2²/2``, so ``L2² ≤ 0.30`` corresponds
-            to ``cosine_sim ≥ 0.85``.
-        alpha: Weight for the recency component.
-        beta: Weight for the frequency component.
-        recompute_interval: Number of evictions between full
-            redundancy re-computations.
-    """
+    """Semantic-aware eviction policy with an incremental neighbour graph."""
 
     # Maximum number of anchor entries for redundancy estimation.
     # Instead of O(N²) all-pairs, we use O(N×S) sampled anchors.
@@ -69,9 +110,10 @@ class SemanticPolicy(EvictionPolicy):
         similarity_threshold: float = 0.30,
         alpha: float = 1.0,
         beta: float = 1.0,
-        recompute_interval: int = 50,
+        recompute_interval: int = 2000,
         mu: float = 0.1,
         dynamic_impute: bool = True,
+        seed: int = 0,
     ) -> None:
         self.similarity_threshold = similarity_threshold
         self.alpha = alpha
@@ -79,6 +121,7 @@ class SemanticPolicy(EvictionPolicy):
         self.recompute_interval = recompute_interval
         self.mu = mu
         self.dynamic_impute = dynamic_impute
+        self._seed = int(seed)
         self._epsilon = 1e-9
 
         # ── Internal state ───────────────────────────────────────
@@ -86,10 +129,10 @@ class SemanticPolicy(EvictionPolicy):
         self._access_order: OrderedDict[int, None] = OrderedDict()
         # Access counts per entry.
         self._access_counts: dict[int, int] = {}
-        # Cached redundancy scores (fraction of neighbours).
-        self._redundancy: dict[int, float] = {}
         # Embeddings stored per cache_id (needed for neighbour counting).
         self._embeddings: dict[int, np.ndarray] = {}
+        # Symmetric neighbour graph — the authoritative redundancy state.
+        self._neighbors: dict[int, set[int]] = {}
         # Counter of evictions since last redundancy recomputation.
         self._evictions_since_recompute: int = 0
 
@@ -108,91 +151,119 @@ class SemanticPolicy(EvictionPolicy):
             self._access_counts[cache_id] += 1
 
     def on_insert(self, cache_id: int, embedding: np.ndarray) -> None:
-        """Register a newly inserted entry."""
+        """Register a newly inserted entry and symmetrically update the
+        neighbour graph against a sampled subset of active entries.
+        """
         self._access_order[cache_id] = None
         self._access_counts[cache_id] = 0
         self._embeddings[cache_id] = embedding.copy()
-        
-        # Dynamic drift-resilient imputation
-        if self.dynamic_impute and self._redundancy:
-            # Deterministically sample active entries excluding the new entry
-            active_ids = [cid for cid in self._embeddings.keys() if cid != cache_id]
-            n_active_ids = len(active_ids)
-            S = min(n_active_ids, self.MAX_REDUNDANCY_SAMPLES)
-            
-            if S == 0:
-                self._redundancy[cache_id] = 0.0
-            else:
-                if n_active_ids > S:
-                    rng = np.random.RandomState(cache_id) # Deterministic
-                    sample_ids = rng.choice(active_ids, S, replace=False).tolist()
-                else:
-                    sample_ids = active_ids
-                    
-                sample_embs = np.array([self._embeddings[cid] for cid in sample_ids], dtype=np.float32)
-                
-                emb = embedding.reshape(1, -1).astype(np.float32)
-                norm_q = np.sum(emb ** 2)
-                norms_S = np.sum(sample_embs ** 2, axis=1)
-                dot = emb @ sample_embs.T
-                dist_sq = norm_q + norms_S - 2 * dot
-                
-                is_neighbor = dist_sq[0] <= self.similarity_threshold
-                r = is_neighbor.sum() / max(S, 1)
-                self._redundancy[cache_id] = float(r)
+        self._neighbors[cache_id] = set()
+
+        if not self.dynamic_impute:
+            return
+
+        # Need at least one other entry to have any neighbour relation.
+        other_ids = [cid for cid in self._embeddings if cid != cache_id]
+        n_others = len(other_ids)
+        if n_others == 0:
+            return
+
+        S = min(n_others, self.MAX_REDUNDANCY_SAMPLES)
+        if n_others > S:
+            rng_seed = self._mix_seed(cache_id)
+            rng = np.random.RandomState(rng_seed)
+            sample_ids = rng.choice(other_ids, S, replace=False).tolist()
         else:
-            self._redundancy[cache_id] = getattr(self, '_mean_redundancy', 0.5)
+            sample_ids = other_ids
+
+        sample_embs = np.array(
+            [self._embeddings[cid] for cid in sample_ids], dtype=np.float32,
+        )
+
+        emb = embedding.reshape(1, -1).astype(np.float32)
+        norm_q = float(np.sum(emb ** 2))
+        norms_S = np.sum(sample_embs ** 2, axis=1)
+        dot = (emb @ sample_embs.T)[0]
+        dist_sq = norm_q + norms_S - 2 * dot
+
+        hits = np.flatnonzero(dist_sq <= self.similarity_threshold)
+        if hits.size == 0:
+            return
+
+        # Symmetric edge insertion — both sides of every discovered pair.
+        new_set = self._neighbors[cache_id]
+        for idx in hits:
+            nid = sample_ids[int(idx)]
+            new_set.add(nid)
+            nbr_set = self._neighbors.get(nid)
+            if nbr_set is not None:
+                nbr_set.add(cache_id)
 
     def on_evict(self, cache_id: int) -> None:
-        """Clean up all bookkeeping for the evicted entry."""
+        """Symmetrically remove *cache_id* from the neighbour graph and
+        clean up all associated bookkeeping.
+        """
+        # Pop first so we also detach any self-loops safely.
+        nbrs = self._neighbors.pop(cache_id, None)
+        if nbrs:
+            for nid in nbrs:
+                other = self._neighbors.get(nid)
+                if other is not None:
+                    other.discard(cache_id)
+
         self._access_order.pop(cache_id, None)
         self._access_counts.pop(cache_id, None)
-        self._redundancy.pop(cache_id, None)
         self._embeddings.pop(cache_id, None)
         self._evictions_since_recompute += 1
         self._n_evictions += 1
 
     def select_victim(self, active_ids: set[int]) -> Optional[int]:
-        """Select the entry with the highest eviction score."""
+        """Select the entry with the highest (r + μ) / utility score."""
         if not active_ids:
             return None
 
         t_start = time.perf_counter()
 
-        # Recompute redundancy scores periodically
+        # Recompute the neighbour graph periodically.
         if self._evictions_since_recompute >= self.recompute_interval:
             self._recompute_redundancy(active_ids)
             self._evictions_since_recompute = 0
 
-        # ── Vectorized Score Computation ─────────────────────────
-        # Safely extract strictly ordered ids filtered to the active set
+        # ── Vectorised score computation ─────────────────────────
+        # Strictly ordered ids (front = oldest, back = newest) filtered
+        # to the active set.
         active_cids = [cid for cid in self._access_order if cid in active_ids]
         n_active = len(active_cids)
-        
         if n_active == 0:
             return None
-            
-        cids = np.array(active_cids, dtype=np.int32)
-        
-        # 1. Vectorized utility: Recency
-        # Smoothly bound above 0 to prevent oldest rank driving Utility to exactly 0 (which
-        # incorrectly triggers immediate eviction over arbitrarily high redundancy).
+
+        cids = np.array(active_cids, dtype=np.int64)
+
+        # 1. Recency with (rank + 1) / n floor so the oldest entry has
+        #    recency = 1/n > 0, not exactly 0.  This prevents the
+        #    utility denominator from collapsing to ε and the oldest
+        #    entry's score from exploding regardless of redundancy.
         ranks = np.arange(n_active, dtype=np.float32)
         recency = (ranks + 1.0) / float(n_active)
 
-        # 2. Vectorized utility: Frequency 
-        # Safely extracted in the exact order of active_cids
-        counts = np.array([self._access_counts.get(cid, 0) for cid in active_cids], dtype=np.float32)
+        # 2. Frequency, normalised by the current maximum count.
+        counts = np.array(
+            [self._access_counts.get(cid, 0) for cid in active_cids],
+            dtype=np.float32,
+        )
         max_count = max(float(np.max(counts)), 1.0)
         freq = counts / max_count
 
-        # 3. Vectorized Redundancy
-        mean_r = getattr(self, '_mean_redundancy', 0.5)
-        r = np.array([self._redundancy.get(cid, mean_r) for cid in active_cids], dtype=np.float32)
+        # 3. Redundancy from the neighbour graph.  Denominator is
+        #    (n_active - 1) so r ∈ [0, 1].
+        denom = max(n_active - 1, 1)
+        r = np.array(
+            [len(self._neighbors.get(cid, ())) for cid in active_cids],
+            dtype=np.float32,
+        ) / float(denom)
 
-        # 4. Evaluation 
+        # 4. (r + μ) / (α · recency + β · freq + ε)
         utility = self.alpha * recency + self.beta * freq + self._epsilon
-        # Eventual Evictability invariant enforced by mu offset
         score = (r + self.mu) / utility
 
         best_idx = int(np.argmax(score))
@@ -217,13 +288,6 @@ class SemanticPolicy(EvictionPolicy):
                 new_counts[id_remap[old_id]] = cnt
         self._access_counts = new_counts
 
-        # Redundancy scores
-        new_red: dict[int, float] = {}
-        for old_id, score in self._redundancy.items():
-            if old_id in id_remap:
-                new_red[id_remap[old_id]] = score
-        self._redundancy = new_red
-
         # Embeddings
         new_embs: dict[int, np.ndarray] = {}
         for old_id, emb in self._embeddings.items():
@@ -231,18 +295,45 @@ class SemanticPolicy(EvictionPolicy):
                 new_embs[id_remap[old_id]] = emb
         self._embeddings = new_embs
 
-        # Force a recomputation on the next eviction
+        # Neighbour graph — remap both keys and set members.  Any
+        # neighbour referring to an evicted id is dropped.
+        new_neighbors: dict[int, set[int]] = {}
+        for old_id, nbrs in self._neighbors.items():
+            if old_id not in id_remap:
+                continue
+            new_id = id_remap[old_id]
+            new_nbrs = {
+                id_remap[o] for o in nbrs if o in id_remap
+            }
+            new_neighbors[new_id] = new_nbrs
+        self._neighbors = new_neighbors
+
+        # Force a recomputation on the next eviction.
         self._evictions_since_recompute = self.recompute_interval
+
+    # ── Helpers ──────────────────────────────────────────────────
+
+    def _mix_seed(self, cache_id: int) -> int:
+        """Combine the base seed and a cache_id into a 31-bit RNG seed.
+
+        Ensures different run seeds produce honestly independent samples
+        for the same cache_id.  Uses a Knuth-style multiplicative mix.
+        """
+        mix = (int(self._seed) * 2654435769 + int(cache_id) * 40503 + 1) & 0x7FFFFFFF
+        # Avoid seeding RandomState with 0 (valid but less ergonomic).
+        return mix or 1
 
     # ── Redundancy computation ───────────────────────────────────
 
     def _recompute_redundancy(self, active_ids: set[int]) -> None:
-        """Batch-recompute redundancy scores using sampled anchors.
+        """Batch-rebuild the symmetric neighbour graph.
 
         Instead of O(N²) all-pairs distances, samples up to
-        MAX_REDUNDANCY_SAMPLES anchor entries and estimates each entry's
-        redundancy as the fraction of *anchors* within the similarity
-        threshold.  This gives O(N × S) complexity where S ≪ N.
+        MAX_REDUNDANCY_SAMPLES anchor entries and discovers every edge
+        incident to at least one anchor.  Each discovered pair is
+        inserted symmetrically into ``_neighbors``, so the graph is
+        always consistent even though it's a subsample of the full
+        similarity graph.
 
         Uses GPU acceleration via PyTorch if available, falling back
         to NumPy.
@@ -261,7 +352,8 @@ class SemanticPolicy(EvictionPolicy):
         # ── Sample anchors if N is large ─────────────────────────
         S = min(n, self.MAX_REDUNDANCY_SAMPLES)
         if S < n:
-            rng = np.random.RandomState(self._n_recomputes)
+            rng_seed = ((self._seed + 1) * 1000003 + self._n_recomputes) & 0x7FFFFFFF
+            rng = np.random.RandomState(rng_seed or 1)
             anchor_idx = rng.choice(n, S, replace=False)
             anchor_idx.sort()
             anchor_embs = embs[anchor_idx]
@@ -269,21 +361,29 @@ class SemanticPolicy(EvictionPolicy):
             anchor_idx = np.arange(n)
             anchor_embs = embs
 
+        # Rebuild the graph from scratch.
+        new_neighbors: dict[int, set[int]] = {cid: set() for cid in ids}
+
+        used_torch = False
         try:
             import os
             os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
             import torch
             if torch.cuda.is_available():
                 self._recompute_redundancy_torch(
-                    ids, embs, n, anchor_embs, anchor_idx, S
+                    ids, embs, n, anchor_embs, anchor_idx, S, new_neighbors,
                 )
-                return
+                used_torch = True
         except ImportError:
             pass
 
-        self._recompute_redundancy_numpy(
-            ids, embs, n, anchor_embs, anchor_idx, S
-        )
+        if not used_torch:
+            self._recompute_redundancy_numpy(
+                ids, embs, n, anchor_embs, anchor_idx, S, new_neighbors,
+            )
+
+        self._neighbors = new_neighbors
+        self._n_recomputes += 1
 
     def _recompute_redundancy_torch(
         self,
@@ -293,8 +393,9 @@ class SemanticPolicy(EvictionPolicy):
         anchor_embs: np.ndarray,
         anchor_idx: np.ndarray,
         S: int,
+        new_neighbors: dict[int, set[int]],
     ) -> None:
-        """GPU-accelerated redundancy computation using PyTorch."""
+        """GPU-accelerated symmetric neighbour discovery via PyTorch."""
         import torch
 
         device = torch.device("cuda")
@@ -304,9 +405,9 @@ class SemanticPolicy(EvictionPolicy):
         norms_sq_all = torch.sum(embs_t ** 2, dim=1)     # (N,)
         norms_sq_anc = torch.sum(anch_t ** 2, dim=1)      # (S,)
 
-        neighbour_counts = torch.zeros(n, dtype=torch.int32, device=device)
+        anchor_idx_t = torch.from_numpy(anchor_idx).to(device)
 
-        # Process all entries against anchors in batches
+        # Process all entries against anchors in batches.
         batch_size = 8192
         for i in range(0, n, batch_size):
             end = min(i + batch_size, n)
@@ -321,36 +422,26 @@ class SemanticPolicy(EvictionPolicy):
 
             is_neighbour = dist_sq <= self.similarity_threshold  # (B, S)
 
-            # Exclude self: if row i+r corresponds to anchor_idx[j],
-            # zero out that cell.  Build a mask vectorised.
-            if S == n:
-                # Full mode — anchor_idx is identity range
-                row_ids = torch.arange(i, end, device=device)  # (B,)
-                # Self-match: row_ids == col index (anchor_idx is 0..N-1)
-                self_mask = row_ids.unsqueeze(1) == torch.arange(
-                    S, device=device
-                ).unsqueeze(0)
-                is_neighbour = is_neighbour & ~self_mask
-            else:
-                # Sampled mode — check if global index appears in
-                # anchor_idx.  Much cheaper than looping.
-                anchor_set_t = torch.from_numpy(anchor_idx).to(device)
-                row_globals = torch.arange(i, end, device=device)
-                self_mask = row_globals.unsqueeze(1) == anchor_set_t.unsqueeze(0)
-                is_neighbour = is_neighbour & ~self_mask
+            # Self-exclusion.
+            row_globals = torch.arange(i, end, device=device)
+            self_mask = row_globals.unsqueeze(1) == anchor_idx_t.unsqueeze(0)
+            is_neighbour = is_neighbour & ~self_mask
 
-            neighbour_counts[i:end] = is_neighbour.sum(dim=1).to(torch.int32)
+            # Pull the pair indices back to the host and update the
+            # symmetric graph.
+            rows, cols = torch.nonzero(is_neighbour, as_tuple=True)
+            if rows.numel() == 0:
+                continue
+            rows_np = rows.cpu().numpy()
+            cols_np = cols.cpu().numpy()
+            row_globals_np = rows_np + i
+            col_globals_np = anchor_idx[cols_np]
 
-        counts_cpu = neighbour_counts.cpu().numpy()
-        denom = max(S - 1, 1) if S == n else max(S, 1)
-        for i, cid in enumerate(ids):
-            self._redundancy[cid] = float(counts_cpu[i]) / denom
-
-        red_vals = list(self._redundancy.values())
-        if red_vals:
-            self._mean_redundancy = float(np.mean(red_vals))
-
-        self._n_recomputes += 1
+            for r_g, c_g in zip(row_globals_np, col_globals_np):
+                cid_i = ids[int(r_g)]
+                cid_j = ids[int(c_g)]
+                new_neighbors[cid_i].add(cid_j)
+                new_neighbors[cid_j].add(cid_i)
 
     def _recompute_redundancy_numpy(
         self,
@@ -360,12 +451,11 @@ class SemanticPolicy(EvictionPolicy):
         anchor_embs: np.ndarray,
         anchor_idx: np.ndarray,
         S: int,
+        new_neighbors: dict[int, set[int]],
     ) -> None:
-        """CPU fallback redundancy computation (sampled anchors)."""
+        """CPU fallback symmetric neighbour discovery (sampled anchors)."""
         norms_sq_all = np.sum(embs ** 2, axis=1)          # (N,)
         norms_sq_anc = np.sum(anchor_embs ** 2, axis=1)    # (S,)
-
-        neighbour_counts = np.zeros(n, dtype=np.int32)
 
         # Batch rows against anchor columns
         batch_size = 2048
@@ -383,26 +473,21 @@ class SemanticPolicy(EvictionPolicy):
             is_neighbour = dist_sq <= self.similarity_threshold
 
             # Vectorised self-exclusion
-            if S == n:
-                row_ids = np.arange(i, end)[:, None]        # (B, 1)
-                col_ids = np.arange(S)[None, :]             # (1, S)
-                is_neighbour &= row_ids != col_ids
-            else:
-                row_ids = np.arange(i, end)[:, None]
-                anch_ids = anchor_idx[None, :]
-                is_neighbour &= row_ids != anch_ids
+            row_globals = np.arange(i, end)[:, None]
+            anch_globals = anchor_idx[None, :]
+            is_neighbour &= row_globals != anch_globals
 
-            neighbour_counts[i:end] = is_neighbour.sum(axis=1)
+            rows, cols = np.where(is_neighbour)
+            if rows.size == 0:
+                continue
+            row_globals_flat = rows + i
+            col_globals_flat = anchor_idx[cols]
 
-        denom = max(S - 1, 1) if S == n else max(S, 1)
-        for i, cid in enumerate(ids):
-            self._redundancy[cid] = neighbour_counts[i] / denom
-
-        red_vals = list(self._redundancy.values())
-        if red_vals:
-            self._mean_redundancy = float(np.mean(red_vals))
-
-        self._n_recomputes += 1
+            for r_g, c_g in zip(row_globals_flat, col_globals_flat):
+                cid_i = ids[int(r_g)]
+                cid_j = ids[int(c_g)]
+                new_neighbors[cid_i].add(cid_j)
+                new_neighbors[cid_j].add(cid_i)
 
     # ── Stats ────────────────────────────────────────────────────
 
@@ -413,6 +498,14 @@ class SemanticPolicy(EvictionPolicy):
             self._total_eviction_time_s / self._n_evictions
             if self._n_evictions > 0 else 0.0
         )
+        if self._neighbors:
+            n = max(len(self._embeddings) - 1, 1)
+            r_vals = [len(s) / n for s in self._neighbors.values()]
+            mean_r = float(np.mean(r_vals)) if r_vals else 0.0
+            max_r = float(np.max(r_vals)) if r_vals else 0.0
+        else:
+            mean_r = 0.0
+            max_r = 0.0
         return {
             "n_evictions": self._n_evictions,
             "n_recomputes": self._n_recomputes,
@@ -424,6 +517,9 @@ class SemanticPolicy(EvictionPolicy):
             "beta": self.beta,
             "mu": self.mu,
             "dynamic_impute": self.dynamic_impute,
+            "seed": self._seed,
+            "mean_redundancy": round(mean_r, 6),
+            "max_redundancy": round(max_r, 6),
         }
 
     @property
@@ -435,5 +531,5 @@ class SemanticPolicy(EvictionPolicy):
             f"SemanticPolicy(threshold={self.similarity_threshold}, "
             f"α={self.alpha}, β={self.beta}, μ={self.mu}, "
             f"recompute_every={self.recompute_interval}, "
-            f"dyn_impute={self.dynamic_impute})"
+            f"dyn_impute={self.dynamic_impute}, seed={self._seed})"
         )

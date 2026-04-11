@@ -237,8 +237,8 @@ class TestSemanticPolicy:
         policy._recompute_redundancy({0, 1, 2, 3})
 
         # The clustered entries should have higher redundancy
-        assert policy._redundancy[0] < policy._redundancy[1], \
-            "Isolated entry should have lower redundancy than clustered"
+        assert len(policy._neighbors[0]) < len(policy._neighbors[1]), \
+            "Isolated entry should have fewer neighbours than clustered"
 
         # Victim should be one of the clustered entries (1, 2, or 3)
         victim = policy.select_victim({0, 1, 2, 3})
@@ -321,6 +321,153 @@ class TestSemanticPolicy:
         # Entry 3 should not be evicted (redundancy=0 → low score)
         victim = policy.select_victim({0, 1, 2, 3})
         assert victim != 3, "Newly inserted entry should not be immediately evicted"
+
+    def test_dynamic_impute_populates_neighbors_for_close_entries(self):
+        """on_insert with dynamic_impute=True must discover and store the
+        new entry's neighbours in the symmetric graph immediately, instead
+        of relying on the next batch recompute."""
+        rng = np.random.RandomState(42)
+        dim = 16
+        center = _random_embedding(dim, rng)
+
+        policy = SemanticPolicy(
+            similarity_threshold=0.30,
+            dynamic_impute=True,
+            recompute_interval=100_000,  # never fires in this test
+        )
+
+        # Seed the cache with a dense cluster.
+        for i in range(5):
+            policy.on_insert(i, _cluster_embedding(center, noise=0.01, rng=rng))
+
+        # Insert a new clustered entry — it should see the existing 5.
+        policy.on_insert(99, _cluster_embedding(center, noise=0.01, rng=rng))
+
+        assert len(policy._neighbors[99]) >= 1, \
+            "Dynamic imputation should discover at least one neighbour"
+
+    def test_on_insert_is_symmetric(self):
+        """When on_insert discovers that e_new is a neighbour of some
+        existing entry j, both _neighbors[e_new] AND _neighbors[j] must
+        be updated — the graph is always symmetric."""
+        rng = np.random.RandomState(42)
+        dim = 16
+        center = _random_embedding(dim, rng)
+
+        policy = SemanticPolicy(
+            similarity_threshold=0.30,
+            dynamic_impute=True,
+            recompute_interval=100_000,
+        )
+
+        # Insert a cluster seed first.
+        policy.on_insert(0, _cluster_embedding(center, noise=0.01, rng=rng))
+        assert policy._neighbors[0] == set()
+
+        # Insert a second clustered entry.
+        policy.on_insert(1, _cluster_embedding(center, noise=0.01, rng=rng))
+
+        # Both sides of the edge must be present.
+        assert 1 in policy._neighbors[0], \
+            "Existing entry's neighbour set must include the newly inserted id"
+        assert 0 in policy._neighbors[1], \
+            "New entry's neighbour set must include the existing id"
+
+    def test_on_evict_removes_from_neighbors_symmetrically(self):
+        """Evicting an entry must purge it from every other entry's
+        neighbour set, not just its own."""
+        rng = np.random.RandomState(42)
+        dim = 16
+        center = _random_embedding(dim, rng)
+
+        policy = SemanticPolicy(
+            similarity_threshold=0.30,
+            dynamic_impute=True,
+            recompute_interval=100_000,
+        )
+
+        for i in range(3):
+            policy.on_insert(i, _cluster_embedding(center, noise=0.01, rng=rng))
+
+        # Precondition: all three are mutually connected.
+        assert 1 in policy._neighbors[0]
+        assert 2 in policy._neighbors[0]
+
+        policy.on_evict(1)
+
+        assert 1 not in policy._neighbors[0], \
+            "Evicted id must be removed from surviving entries' neighbour sets"
+        assert 1 not in policy._neighbors[2]
+        assert 1 not in policy._neighbors, \
+            "Evicted id must have no entry of its own in _neighbors"
+
+    def test_recency_floor_prevents_ancient_entry_explosion(self):
+        """Even when the oldest entry has never been accessed, its
+        utility must not collapse to ε (which would make its score
+        explode regardless of redundancy).  The recency floor (rank+1)/n
+        keeps utility ≥ 1/n."""
+        policy = SemanticPolicy(
+            similarity_threshold=0.30,
+            alpha=1.0,
+            beta=1.0,
+            mu=0.1,
+            dynamic_impute=False,  # isolate the recency-floor effect
+            recompute_interval=100_000,
+        )
+
+        dim = 16
+        rng = np.random.RandomState(42)
+
+        # Insert 10 isolated entries (no neighbours → r = 0 for all).
+        for i in range(10):
+            policy.on_insert(i, _random_embedding(dim, rng))
+
+        # With r = 0 for everyone and freq = 0 for everyone, the score
+        # reduces to mu/recency.  The oldest entry (rank 0) has recency
+        # = 1/10 (NOT 0), so its score is mu * 10, not mu / ε.
+        # Victim should still be the oldest entry (rank 0 = id 0).
+        victim = policy.select_victim({0, 1, 2, 3, 4, 5, 6, 7, 8, 9})
+        assert victim == 0, \
+            "Oldest untouched entry should still win, but via a finite denominator"
+
+        # And the result must be an int, not NaN/Inf-driven.
+        assert isinstance(victim, int)
+
+    def test_large_mu_degenerates_to_inverse_utility(self):
+        """With mu → ∞, the semantic policy's score is dominated by
+        mu/utility, so the ordering collapses to `argmax(1/utility)` =
+        `argmin(utility)` = plain LRU+LFU behaviour.  This is the
+        worst-case guarantee of the convex blend."""
+        rng = np.random.RandomState(42)
+        dim = 16
+        center = _random_embedding(dim, rng)
+
+        policy = SemanticPolicy(
+            similarity_threshold=0.30,
+            alpha=1.0,
+            beta=1.0,
+            mu=1e6,  # dominates the numerator
+            dynamic_impute=True,
+            recompute_interval=100_000,
+        )
+
+        # Three clustered entries — all mutually redundant.
+        for i in range(3):
+            policy.on_insert(i, _cluster_embedding(center, noise=0.01, rng=rng))
+
+        # Heavily access entry 0 (makes it the most frequent AND the
+        # most recently accessed).
+        for _ in range(50):
+            policy.on_access(0)
+
+        # Under LRU+LFU: entry 0 has highest utility → lowest 1/utility
+        # → lowest score → NOT the victim.  Entry 1 was inserted before
+        # entry 2 (oldest untouched remaining).
+        victim = policy.select_victim({0, 1, 2})
+        assert victim != 0, \
+            "With mu → ∞, the heavily-accessed entry must be protected"
+        assert victim == 1, \
+            "Under LRU+LFU degeneration, the oldest untouched entry wins"
 
 
 # ═════════════════════════════════════════════════════════════════════

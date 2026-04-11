@@ -20,9 +20,9 @@ eviction:
     similarity_threshold: 0.30        # L2² threshold (≈ cosine 0.85)
     alpha: 1.0                        # recency weight
     beta: 1.0                         # frequency weight
-    mu: 0.1                           # Eventual Evictability base factor
-    dynamic_impute: true              # Real-time redundancy eval against drift
-    recompute_interval: 5000          # batch-recompute redundancy every N evictions (was 1000)
+    mu: 0.1                           # Eventual-evictability / LRU+LFU blend constant
+    dynamic_impute: true              # Symmetric online neighbour-graph updates on insert
+    recompute_interval: 2000          # Full graph rebuild every N evictions (online updates keep it fresh between)
 
 evaluation:
   warmup_pct: 0.30                    # first 30% of queries warm up the cache

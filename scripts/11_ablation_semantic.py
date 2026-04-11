@@ -39,6 +39,7 @@ def run_ablation(
     cache_pct: float,
     hit_threshold: float,
     semantic_cfg: dict | None = None,
+    seed: int = 42,
 ) -> dict:
     """Run one cache simulation stream."""
     n = len(embeddings)
@@ -66,7 +67,8 @@ def run_ablation(
             beta=cfg.get("beta", 1.0),
             recompute_interval=cfg.get("recompute_interval", 100),
             mu=cfg.get("mu", 0.1),
-            dynamic_impute=cfg.get("dynamic_impute", True)
+            dynamic_impute=cfg.get("dynamic_impute", True),
+            seed=seed,
         )
     else:
         raise ValueError(f"Unknown policy: {policy_name}")
@@ -126,6 +128,7 @@ def main():
         {"name": "Sem(μ=0,Dyn=F)", "mu": 0.0, "dynamic_impute": False, "recompute_interval": 200},
         {"name": "Sem(μ=0.1,Dyn=F)", "mu": 0.1, "dynamic_impute": False, "recompute_interval": 200},
         {"name": "Sem(μ=0.1,Dyn=T)", "mu": 0.1, "dynamic_impute": True, "recompute_interval": 200},
+        {"name": "Sem(μ=0.5,Dyn=T)", "mu": 0.5, "dynamic_impute": True, "recompute_interval": 200},
     ]
 
     results = []
@@ -137,14 +140,14 @@ def main():
         for baseline in ["lru", "lfu"]:
             run_num += 1
             logger.info(f"[{run_num}/{total}] Running {baseline} @ {cache_pct*100:.0f}%")
-            r = run_ablation(embeddings, texts, baseline, cache_pct, hit_threshold)
+            r = run_ablation(embeddings, texts, baseline, cache_pct, hit_threshold, seed=42)
             results.append(r)
 
         for cfg in ablation_cfgs:
             run_num += 1
             logger.info(f"[{run_num}/{total}] Running {cfg['name']} @ {cache_pct*100:.0f}%")
             scfg = {"similarity_threshold": 0.30, "alpha": 1.0, "beta": 1.0, **cfg}
-            r = run_ablation(embeddings, texts, "semantic", cache_pct, hit_threshold, semantic_cfg=scfg)
+            r = run_ablation(embeddings, texts, "semantic", cache_pct, hit_threshold, semantic_cfg=scfg, seed=42)
             r["policy"] = cfg["name"]
             results.append(r)
 

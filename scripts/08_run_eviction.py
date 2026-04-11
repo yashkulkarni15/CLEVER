@@ -98,6 +98,7 @@ def create_policy(
     cache_embs: np.ndarray,
     cache_ids: list[int],
     stream_embs: np.ndarray,
+    seed: int = 0,
 ) -> "EvictionPolicy":
     """Create an eviction policy instance from config.
 
@@ -107,6 +108,7 @@ def create_policy(
         cache_embs: Initial cache embeddings (for oracle pre-computation).
         cache_ids: Initial cache IDs.
         stream_embs: Future query stream embeddings (for oracle).
+        seed: Base seed forwarded to semantic policy's imputation RNG.
     """
     eviction_cfg = config.get("eviction", {})
 
@@ -123,6 +125,7 @@ def create_policy(
             recompute_interval=sem_cfg.get("recompute_interval", 50),
             mu=sem_cfg.get("mu", 0.1),
             dynamic_impute=sem_cfg.get("dynamic_impute", True),
+            seed=seed,
         )
     elif policy_name == "oracle":
         oracle_cfg = eviction_cfg.get("oracle", {})
@@ -272,7 +275,7 @@ def evaluate_policy(
     # ── Create policy ────────────────────────────────────────────
     cache_ids = list(range(n_warmup))
     policy = create_policy(
-        policy_name, config, warmup_embs, cache_ids, stream_embs
+        policy_name, config, warmup_embs, cache_ids, stream_embs, seed=seed,
     )
 
     # ── Build cache ──────────────────────────────────────────────

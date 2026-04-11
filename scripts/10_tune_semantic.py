@@ -70,6 +70,9 @@ def run_single(
             alpha=cfg.get("alpha", 1.0),
             beta=cfg.get("beta", 1.0),
             recompute_interval=cfg.get("recompute_interval", 500),
+            mu=cfg.get("mu", 0.1),
+            dynamic_impute=cfg.get("dynamic_impute", True),
+            seed=seed,
         )
     else:
         raise ValueError(f"Unknown policy: {policy_name}")
@@ -111,6 +114,32 @@ def run_single(
     }
 
 
+def _build_semantic_configs() -> list[dict]:
+    """Programmatic μ × dynamic_impute grid at fixed (threshold, α, β, recompute)."""
+    similarity_threshold = 0.30
+    alpha = 1.0
+    beta = 1.0
+    recompute_interval = 2000
+    mu_values = [0.0, 0.05, 0.1, 0.2, 0.5]
+    dyn_values = [True, False]
+
+    configs = []
+    for mu in mu_values:
+        for dyn in dyn_values:
+            dyn_tag = "T" if dyn else "F"
+            name = f"sem_mu{mu:.2f}_dyn{dyn_tag}"
+            configs.append({
+                "name": name,
+                "similarity_threshold": similarity_threshold,
+                "alpha": alpha,
+                "beta": beta,
+                "recompute_interval": recompute_interval,
+                "mu": mu,
+                "dynamic_impute": dyn,
+            })
+    return configs
+
+
 def main():
     # Load dev embeddings
     emb_path = "results/embeddings/full_embeddings.npy"
@@ -118,15 +147,9 @@ def main():
     logger.info(f"Loaded {embeddings.shape[0]} embeddings, dim={embeddings.shape[1]}")
 
     # ── Experiment grid ──────────────────────────────────────────
-    cache_sizes = [0.05, 0.10, 0.15, 0.20]
-    hit_thresholds = [0.90, 0.70, 0.50]
-    semantic_configs = [
-        {"name": "sem_default", "similarity_threshold": 0.30, "alpha": 1.0, "beta": 1.0, "recompute_interval": 5000},
-        {"name": "sem_freq500", "similarity_threshold": 0.30, "alpha": 1.0, "beta": 1.0, "recompute_interval": 500},
-        {"name": "sem_freq100", "similarity_threshold": 0.30, "alpha": 1.0, "beta": 1.0, "recompute_interval": 100},
-        {"name": "sem_recency", "similarity_threshold": 0.30, "alpha": 2.0, "beta": 0.5, "recompute_interval": 500},
-        {"name": "sem_frequency", "similarity_threshold": 0.30, "alpha": 0.5, "beta": 2.0, "recompute_interval": 500},
-    ]
+    cache_sizes = [0.10, 0.20]
+    hit_thresholds = [0.90, 0.50]
+    semantic_configs = _build_semantic_configs()
 
     results = []
     total = len(cache_sizes) * len(hit_thresholds) * (2 + len(semantic_configs))
@@ -149,24 +172,35 @@ def main():
                 logger.info(f"[{run_num}/{total}] {name} cache={cache_pct:.0%} ht={ht}")
                 r = run_single(embeddings, "semantic", cache_pct, ht, semantic_cfg=cfg)
                 r["policy"] = name  # override for readability
+                r["mu"] = cfg.get("mu", 0.1)
+                r["dynamic_impute"] = cfg.get("dynamic_impute", True)
                 results.append(r)
 
     # ── Print results table ──────────────────────────────────────
-    print("\n" + "=" * 95)
-    print(f"{'Policy':<16s} {'Cache%':>6s} {'HitThr':>6s} {'HitRate':>8s} {'Hits':>6s} {'Miss':>6s} {'ms/q':>7s} {'Time':>6s}")
-    print("-" * 95)
+    print("\n" + "=" * 108)
+    print(
+        f"{'Policy':<22s} {'Cache%':>6s} {'HitThr':>6s} {'μ':>6s} {'Dyn':>4s} "
+        f"{'HitRate':>8s} {'Hits':>6s} {'Miss':>6s} {'ms/q':>7s} {'Time':>6s}"
+    )
+    print("-" * 108)
 
     for r in results:
+        is_baseline = r["policy"] in ("lru", "lfu")
+        mu_str = "" if is_baseline else f"{r.get('mu', 0.0):.2f}"
+        dyn_str = "" if is_baseline else ("T" if r.get("dynamic_impute", True) else "F")
         print(
-            f"{r['policy']:<16s} {r['cache_pct']:>5.0%} {r['hit_threshold']:>6.2f} "
+            f"{r['policy']:<22s} {r['cache_pct']:>5.0%} {r['hit_threshold']:>6.2f} "
+            f"{mu_str:>6s} {dyn_str:>4s} "
             f"{r['hit_rate']:>7.4f} {r['n_hits']:>6d} {r['n_misses']:>6d} "
             f"{r['avg_query_ms']:>7.3f} {r['elapsed_s']:>5.1f}s"
         )
 
     # ── Summary: best semantic vs best baseline per config ───────
-    print("\n" + "=" * 95)
+    print("\n" + "=" * 108)
     print("SUMMARY: Semantic vs Best Baseline")
-    print("-" * 95)
+    print("-" * 108)
+
+    per_cell_deltas: list[tuple[float, dict]] = []
 
     for cache_pct in cache_sizes:
         for ht in hit_thresholds:
@@ -178,14 +212,55 @@ def main():
             best_sem = max(semantics, key=lambda r: r["hit_rate"])
 
             delta = best_sem["hit_rate"] - best_base["hit_rate"]
-            marker = "✅" if delta > 0.005 else ("⚠️ " if delta > 0 else "❌")
+            marker = "WIN" if delta > 0.005 else ("TIE" if delta > 0 else "LOSS")
 
             print(
                 f"  cache={cache_pct:.0%} ht={ht:.2f}: "
                 f"best_baseline={best_base['policy']}({best_base['hit_rate']:.4f}) "
                 f"best_semantic={best_sem['policy']}({best_sem['hit_rate']:.4f}) "
-                f"Δ={delta:+.4f} {marker}"
+                f"Δ={delta:+.4f} [{marker}]"
             )
+
+            per_cell_deltas.append((delta, best_sem))
+
+    # ── Global summary: best semantic config across all cells ────
+    print("\n" + "=" * 108)
+    print("GLOBAL SUMMARY: Best Semantic Config Across All Cells")
+    print("-" * 108)
+
+    # For each semantic config name, compute its average (hit_rate - best_baseline_hit_rate)
+    # over every (cache_pct, hit_threshold) cell.
+    config_advantages: dict[str, list[float]] = {}
+    config_dicts: dict[str, dict] = {}
+
+    for cache_pct in cache_sizes:
+        for ht in hit_thresholds:
+            subset = [r for r in results if r["cache_pct"] == cache_pct and r["hit_threshold"] == ht]
+            baselines = [r for r in subset if r["policy"] in ("lru", "lfu")]
+            semantics = [r for r in subset if r["policy"] not in ("lru", "lfu")]
+            best_base_hr = max(baselines, key=lambda r: r["hit_rate"])["hit_rate"]
+
+            for sem in semantics:
+                name = sem["policy"]
+                adv = sem["hit_rate"] - best_base_hr
+                config_advantages.setdefault(name, []).append(adv)
+                if name not in config_dicts:
+                    config_dicts[name] = sem.get("semantic_cfg") or {}
+
+    if config_advantages:
+        avg_advantages = {
+            name: float(np.mean(advs)) for name, advs in config_advantages.items()
+        }
+        best_name = max(avg_advantages, key=avg_advantages.get)
+        best_avg = avg_advantages[best_name]
+        best_cfg = config_dicts[best_name]
+
+        print(
+            f"  Best semantic config: {best_name}\n"
+            f"  Config dict: {best_cfg}\n"
+            f"  Average hit-rate advantage over best-baseline-per-cell: {best_avg:+.4f}"
+        )
+    print("=" * 108)
 
 
 if __name__ == "__main__":
