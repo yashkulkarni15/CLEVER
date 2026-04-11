@@ -115,27 +115,31 @@ class SemanticPolicy(EvictionPolicy):
         
         # Dynamic drift-resilient imputation
         if self.dynamic_impute and self._redundancy:
-            # Randomly sample active entries to quickly approximate the new entry's redundancy
-            active_ids = list(self._embeddings.keys())
-            S = min(len(active_ids), self.MAX_REDUNDANCY_SAMPLES)
+            # Deterministically sample active entries excluding the new entry
+            active_ids = [cid for cid in self._embeddings.keys() if cid != cache_id]
+            n_active_ids = len(active_ids)
+            S = min(n_active_ids, self.MAX_REDUNDANCY_SAMPLES)
             
-            if len(active_ids) > S:
-                import random
-                sample_ids = random.sample(active_ids, S)
+            if S == 0:
+                self._redundancy[cache_id] = 0.0
             else:
-                sample_ids = active_ids
+                if n_active_ids > S:
+                    rng = np.random.RandomState(cache_id) # Deterministic
+                    sample_ids = rng.choice(active_ids, S, replace=False).tolist()
+                else:
+                    sample_ids = active_ids
+                    
+                sample_embs = np.array([self._embeddings[cid] for cid in sample_ids], dtype=np.float32)
                 
-            sample_embs = np.array([self._embeddings[cid] for cid in sample_ids], dtype=np.float32)
-            
-            emb = embedding.reshape(1, -1).astype(np.float32)
-            norm_q = np.sum(emb ** 2)
-            norms_S = np.sum(sample_embs ** 2, axis=1)
-            dot = emb @ sample_embs.T
-            dist_sq = norm_q + norms_S - 2 * dot
-            
-            is_neighbor = dist_sq[0] <= self.similarity_threshold
-            r = is_neighbor.sum() / max(S, 1)
-            self._redundancy[cache_id] = float(r)
+                emb = embedding.reshape(1, -1).astype(np.float32)
+                norm_q = np.sum(emb ** 2)
+                norms_S = np.sum(sample_embs ** 2, axis=1)
+                dot = emb @ sample_embs.T
+                dist_sq = norm_q + norms_S - 2 * dot
+                
+                is_neighbor = dist_sq[0] <= self.similarity_threshold
+                r = is_neighbor.sum() / max(S, 1)
+                self._redundancy[cache_id] = float(r)
         else:
             self._redundancy[cache_id] = getattr(self, '_mean_redundancy', 0.5)
 
@@ -171,8 +175,10 @@ class SemanticPolicy(EvictionPolicy):
         cids = np.array(active_cids, dtype=np.int32)
         
         # 1. Vectorized utility: Recency
+        # Smoothly bound above 0 to prevent oldest rank driving Utility to exactly 0 (which
+        # incorrectly triggers immediate eviction over arbitrarily high redundancy).
         ranks = np.arange(n_active, dtype=np.float32)
-        recency = ranks / max(n_active - 1, 1)
+        recency = (ranks + 1.0) / float(n_active)
 
         # 2. Vectorized utility: Frequency 
         # Safely extracted in the exact order of active_cids

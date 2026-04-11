@@ -121,6 +121,8 @@ def create_policy(
             alpha=sem_cfg.get("alpha", 1.0),
             beta=sem_cfg.get("beta", 1.0),
             recompute_interval=sem_cfg.get("recompute_interval", 50),
+            mu=sem_cfg.get("mu", 0.1),
+            dynamic_impute=sem_cfg.get("dynamic_impute", True),
         )
     elif policy_name == "oracle":
         oracle_cfg = eviction_cfg.get("oracle", {})
