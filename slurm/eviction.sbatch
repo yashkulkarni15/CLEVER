@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=clever-eviction
-#SBATCH --account=stats_dept2
+#SBATCH --account=stats_dept1
 #SBATCH --partition=largemem
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
-#SBATCH --time=72:00:00
+#SBATCH --mem=64G
+#SBATCH --time=7-00:00:00
 #SBATCH --output=logs/eviction_%j.log
 #SBATCH --error=logs/eviction_%j.err
 #SBATCH --mail-user=yashkulk@umich.edu
@@ -15,7 +15,7 @@
 # ──────────────────────────────────────────────────────────────
 # Phase 4: Semantic-Aware Eviction Policy Evaluation (Multi-Seed)
 # largemem partition — more cores + memory for FAISS batch search.
-# Runs the full eviction matrix: 4 policies x 3 cache sizes x 3 seeds
+# Runs the full eviction matrix: 3 policies x 3 cache sizes x 3 seeds
 #
 # Supports checkpoint/resume: if the job is killed mid-run,
 # resubmit and it will skip already-completed runs automatically.
@@ -60,12 +60,10 @@ echo ""
 
 # ── Run eviction experiments (multi-seed, all policies) ──────
 # Config drives the full matrix:
-#   policies: [lru, lfu, semantic, oracle]
+#   policies: [lru, lfu, semantic]
 #   cache_sizes_pct: [0.10, 0.20, 0.30]
 #   seeds: [42, 123, 456]
 #   workloads: [temporal]
-#   oracle.refresh_interval: 5000
-#   oracle.horizon: 50000 (bounded lookahead)
 #   log_interval: 500
 #
 # Checkpoint/resume: if a previous run was interrupted, this will

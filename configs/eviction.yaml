@@ -10,7 +10,7 @@ cache:
   cache_sizes_pct: [0.10, 0.20, 0.30]  # fraction of unique queries
 
 eviction:
-  policies: [lru, lfu, semantic, oracle]
+  policies: [lru, lfu, semantic]
   oracle:
     refresh_interval: 5000            # full future-use rebuild every N evictions (was 100)
     horizon: 50000                    # bounded lookahead: only search next 50K stream queries
@@ -20,6 +20,8 @@ eviction:
     similarity_threshold: 0.30        # L2² threshold (≈ cosine 0.85)
     alpha: 1.0                        # recency weight
     beta: 1.0                         # frequency weight
+    mu: 0.1                           # Eventual Evictability base factor
+    dynamic_impute: true              # Real-time redundancy eval against drift
     recompute_interval: 5000          # batch-recompute redundancy every N evictions (was 1000)
 
 evaluation:

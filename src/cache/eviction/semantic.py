@@ -70,11 +70,15 @@ class SemanticPolicy(EvictionPolicy):
         alpha: float = 1.0,
         beta: float = 1.0,
         recompute_interval: int = 50,
+        mu: float = 0.1,
+        dynamic_impute: bool = True,
     ) -> None:
         self.similarity_threshold = similarity_threshold
         self.alpha = alpha
         self.beta = beta
         self.recompute_interval = recompute_interval
+        self.mu = mu
+        self.dynamic_impute = dynamic_impute
         self._epsilon = 1e-9
 
         # ── Internal state ───────────────────────────────────────
@@ -108,10 +112,32 @@ class SemanticPolicy(EvictionPolicy):
         self._access_order[cache_id] = None
         self._access_counts[cache_id] = 0
         self._embeddings[cache_id] = embedding.copy()
-        # New entries start with unknown redundancy — they'll be
-        # scored on the next batch recomputation.  For now, assign 0
-        # (isolated) so they are *not* immediately evicted.
-        self._redundancy[cache_id] = 0.0
+        
+        # Dynamic drift-resilient imputation
+        if self.dynamic_impute and self._redundancy:
+            # Randomly sample active entries to quickly approximate the new entry's redundancy
+            active_ids = list(self._embeddings.keys())
+            S = min(len(active_ids), self.MAX_REDUNDANCY_SAMPLES)
+            
+            if len(active_ids) > S:
+                import random
+                sample_ids = random.sample(active_ids, S)
+            else:
+                sample_ids = active_ids
+                
+            sample_embs = np.array([self._embeddings[cid] for cid in sample_ids], dtype=np.float32)
+            
+            emb = embedding.reshape(1, -1).astype(np.float32)
+            norm_q = np.sum(emb ** 2)
+            norms_S = np.sum(sample_embs ** 2, axis=1)
+            dot = emb @ sample_embs.T
+            dist_sq = norm_q + norms_S - 2 * dot
+            
+            is_neighbor = dist_sq[0] <= self.similarity_threshold
+            r = is_neighbor.sum() / max(S, 1)
+            self._redundancy[cache_id] = float(r)
+        else:
+            self._redundancy[cache_id] = getattr(self, '_mean_redundancy', 0.5)
 
     def on_evict(self, cache_id: int) -> None:
         """Clean up all bookkeeping for the evicted entry."""
@@ -134,42 +160,37 @@ class SemanticPolicy(EvictionPolicy):
             self._recompute_redundancy(active_ids)
             self._evictions_since_recompute = 0
 
-        # ── Compute per-entry scores ─────────────────────────────
-        # Normalise recency: rank / N  (higher = more recent = safer)
-        n_active = len(active_ids)
-        access_list = [
-            cid for cid in self._access_order if cid in active_ids
-        ]
-        recency = {}
-        for rank, cid in enumerate(access_list):
-            # rank 0 = oldest → recency 0;  rank N-1 = newest → recency 1
-            recency[cid] = rank / max(n_active - 1, 1)
+        # ── Vectorized Score Computation ─────────────────────────
+        # Safely extract strictly ordered ids filtered to the active set
+        active_cids = [cid for cid in self._access_order if cid in active_ids]
+        n_active = len(active_cids)
+        
+        if n_active == 0:
+            return None
+            
+        cids = np.array(active_cids, dtype=np.int32)
+        
+        # 1. Vectorized utility: Recency
+        ranks = np.arange(n_active, dtype=np.float32)
+        recency = ranks / max(n_active - 1, 1)
 
-        # Normalise frequency: count / max_count
-        counts = {
-            cid: self._access_counts.get(cid, 0) for cid in active_ids
-        }
-        max_count = max(counts.values()) if counts else 1
-        max_count = max(float(max_count), 1.0)  # avoid div-by-zero
+        # 2. Vectorized utility: Frequency 
+        # Safely extracted in the exact order of active_cids
+        counts = np.array([self._access_counts.get(cid, 0) for cid in active_cids], dtype=np.float32)
+        max_count = max(float(np.max(counts)), 1.0)
+        freq = counts / max_count
 
-        best_score = -1.0
-        victim: Optional[int] = None
+        # 3. Vectorized Redundancy
+        mean_r = getattr(self, '_mean_redundancy', 0.5)
+        r = np.array([self._redundancy.get(cid, mean_r) for cid in active_cids], dtype=np.float32)
 
-        for cid in active_ids:
-            r = self._redundancy.get(cid, 0.0)
-            rec = recency.get(cid, 0.0)
-            freq = counts[cid] / max_count
+        # 4. Evaluation 
+        utility = self.alpha * recency + self.beta * freq + self._epsilon
+        # Eventual Evictability invariant enforced by mu offset
+        score = (r + self.mu) / utility
 
-            utility = self.alpha * rec + self.beta * freq + self._epsilon
-            score = r / utility
-
-            # Catch NaNs
-            if np.isnan(score):
-                score = 0.0
-
-            if score > best_score:
-                best_score = score
-                victim = cid
+        best_idx = int(np.argmax(score))
+        victim = int(cids[best_idx])
 
         self._total_eviction_time_s += time.perf_counter() - t_start
         return victim
@@ -319,6 +340,10 @@ class SemanticPolicy(EvictionPolicy):
         for i, cid in enumerate(ids):
             self._redundancy[cid] = float(counts_cpu[i]) / denom
 
+        red_vals = list(self._redundancy.values())
+        if red_vals:
+            self._mean_redundancy = float(np.mean(red_vals))
+
         self._n_recomputes += 1
 
     def _recompute_redundancy_numpy(
@@ -367,6 +392,10 @@ class SemanticPolicy(EvictionPolicy):
         for i, cid in enumerate(ids):
             self._redundancy[cid] = neighbour_counts[i] / denom
 
+        red_vals = list(self._redundancy.values())
+        if red_vals:
+            self._mean_redundancy = float(np.mean(red_vals))
+
         self._n_recomputes += 1
 
     # ── Stats ────────────────────────────────────────────────────
@@ -387,6 +416,8 @@ class SemanticPolicy(EvictionPolicy):
             "recompute_interval": self.recompute_interval,
             "alpha": self.alpha,
             "beta": self.beta,
+            "mu": self.mu,
+            "dynamic_impute": self.dynamic_impute,
         }
 
     @property
@@ -396,6 +427,7 @@ class SemanticPolicy(EvictionPolicy):
     def __repr__(self) -> str:
         return (
             f"SemanticPolicy(threshold={self.similarity_threshold}, "
-            f"α={self.alpha}, β={self.beta}, "
-            f"recompute_every={self.recompute_interval})"
+            f"α={self.alpha}, β={self.beta}, μ={self.mu}, "
+            f"recompute_every={self.recompute_interval}, "
+            f"dyn_impute={self.dynamic_impute})"
         )
