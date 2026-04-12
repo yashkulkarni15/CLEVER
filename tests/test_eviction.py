@@ -433,11 +433,11 @@ class TestSemanticPolicy:
         # And the result must be an int, not NaN/Inf-driven.
         assert isinstance(victim, int)
 
-    def test_large_mu_degenerates_to_inverse_utility(self):
+    def test_large_mu_approaches_inverse_utility(self):
         """With mu → ∞, the semantic policy's score is dominated by
-        mu/utility, so the ordering collapses to `argmax(1/utility)` =
-        `argmin(utility)` = plain LRU+LFU behaviour.  This is the
-        worst-case guarantee of the convex blend."""
+        mu/utility, so the ordering asymptotically approaches
+        `argmax(1/utility)` = `argmin(utility)` = plain LRU+LFU
+        behaviour.  This is the graceful-degradation guarantee."""
         rng = np.random.RandomState(42)
         dim = 16
         center = _random_embedding(dim, rng)

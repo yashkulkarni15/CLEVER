@@ -115,27 +115,29 @@ def run_single(
 
 
 def _build_semantic_configs() -> list[dict]:
-    """Programmatic μ × dynamic_impute grid at fixed (threshold, α, β, recompute)."""
-    similarity_threshold = 0.30
+    """Grid over similarity_threshold × μ with dynamic_impute fixed to True.
+
+    similarity_threshold must be ≤ hit_threshold (0.90); sweeping it shows
+    how neighbor density drives the semantic advantage over LRU/LFU.
+    """
+    threshold_values = [0.50, 0.70, 0.90]
+    mu_values = [0.0, 0.1, 0.5]
     alpha = 1.0
     beta = 1.0
     recompute_interval = 2000
-    mu_values = [0.0, 0.05, 0.1, 0.2, 0.5]
-    dyn_values = [True, False]
 
     configs = []
-    for mu in mu_values:
-        for dyn in dyn_values:
-            dyn_tag = "T" if dyn else "F"
-            name = f"sem_mu{mu:.2f}_dyn{dyn_tag}"
+    for thresh in threshold_values:
+        for mu in mu_values:
+            name = f"sem_t{thresh:.2f}_mu{mu:.2f}"
             configs.append({
                 "name": name,
-                "similarity_threshold": similarity_threshold,
+                "similarity_threshold": thresh,
                 "alpha": alpha,
                 "beta": beta,
                 "recompute_interval": recompute_interval,
                 "mu": mu,
-                "dynamic_impute": dyn,
+                "dynamic_impute": True,
             })
     return configs
 
@@ -179,18 +181,18 @@ def main():
     # ── Print results table ──────────────────────────────────────
     print("\n" + "=" * 108)
     print(
-        f"{'Policy':<22s} {'Cache%':>6s} {'HitThr':>6s} {'μ':>6s} {'Dyn':>4s} "
+        f"{'Policy':<22s} {'Cache%':>6s} {'HitThr':>6s} {'SemThr':>7s} {'μ':>6s} "
         f"{'HitRate':>8s} {'Hits':>6s} {'Miss':>6s} {'ms/q':>7s} {'Time':>6s}"
     )
     print("-" * 108)
 
     for r in results:
         is_baseline = r["policy"] in ("lru", "lfu")
+        semthr_str = "" if is_baseline else f"{r.get('semantic_cfg', {}).get('similarity_threshold', ''):>5}"
         mu_str = "" if is_baseline else f"{r.get('mu', 0.0):.2f}"
-        dyn_str = "" if is_baseline else ("T" if r.get("dynamic_impute", True) else "F")
         print(
             f"{r['policy']:<22s} {r['cache_pct']:>5.0%} {r['hit_threshold']:>6.2f} "
-            f"{mu_str:>6s} {dyn_str:>4s} "
+            f"{semthr_str:>7s} {mu_str:>6s} "
             f"{r['hit_rate']:>7.4f} {r['n_hits']:>6d} {r['n_misses']:>6d} "
             f"{r['avg_query_ms']:>7.3f} {r['elapsed_s']:>5.1f}s"
         )

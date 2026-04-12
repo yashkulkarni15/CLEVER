@@ -16,15 +16,16 @@ Eviction score
 
 where ``r(e) = |neighbours(e)| / max(n_active - 1, 1)``.
 
-The ``+ μ`` smoothing in the numerator is a **convex blend** between
-two ranking criteria:
+The ``+ μ`` is **additive (Laplace-style) smoothing** that mixes two
+ranking criteria:
 
     score(e) = r(e) / u(e)  +  μ · (1 / u(e))
-             = semantic term +  μ · LRU+LFU term
+             = semantic term +  μ · inverse-utility term
 
 - **μ → 0**   ⇒ pure redundancy-over-utility scoring.
-- **μ → ∞**   ⇒ policy degenerates to plain inverse-utility, i.e.
-  LRU+LFU with the redundancy signal washed out.
+- **μ → ∞**   ⇒ score approaches plain inverse-utility ordering
+  asymptotically (LRU+LFU), with the redundancy signal washed out.
+  The two orderings agree exactly only in the limit.
 
 This guarantees the policy never does worse than LRU+LFU when the
 redundancy signal is uninformative — it degrades gracefully instead
@@ -72,8 +73,9 @@ similarity_threshold
 alpha, beta
     Weights on the recency and frequency components of utility.
 mu
-    Eventual-evictability smoothing constant.  Blends semantic
-    scoring with plain LRU+LFU.  Default 0.1.
+    Additive smoothing constant for eventual evictability.  Mixes
+    semantic scoring with inverse-utility ordering; score approaches
+    pure inverse-utility asymptotically as μ → ∞.  Default 0.1.
 dynamic_impute
     If True, run the sampled symmetric update on every insert.  If
     False, new entries start with an empty neighbour set and rely on

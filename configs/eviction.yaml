@@ -17,7 +17,10 @@ eviction:
                                       # instead of entire remaining stream. 0 = unlimited.
                                       # Reduces refresh from O(S×C) to O(horizon×C).
   semantic:
-    similarity_threshold: 0.30        # L2² threshold (≈ cosine 0.85)
+    similarity_threshold: 0.90        # L2² threshold — matches hit_threshold so two
+                                    # cached entries are neighbours iff one would be
+                                    # a cache hit for the other (cosine ≥ 0.55).
+                                    # Must satisfy: similarity_threshold ≤ hit_threshold.
     alpha: 1.0                        # recency weight
     beta: 1.0                         # frequency weight
     mu: 0.1                           # Eventual-evictability / LRU+LFU blend constant

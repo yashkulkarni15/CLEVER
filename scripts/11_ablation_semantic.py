@@ -125,10 +125,15 @@ def main():
     hit_threshold = 0.50 # Use rigorous matching to separate dense clusters
     
     ablation_cfgs = [
-        {"name": "Sem(μ=0,Dyn=F)", "mu": 0.0, "dynamic_impute": False, "recompute_interval": 200},
-        {"name": "Sem(μ=0.1,Dyn=F)", "mu": 0.1, "dynamic_impute": False, "recompute_interval": 200},
-        {"name": "Sem(μ=0.1,Dyn=T)", "mu": 0.1, "dynamic_impute": True, "recompute_interval": 200},
-        {"name": "Sem(μ=0.5,Dyn=T)", "mu": 0.5, "dynamic_impute": True, "recompute_interval": 200},
+        # Threshold ablation: shows impact of fixing the threshold mismatch
+        # (similarity_threshold was 0.30 — too tight vs hit_threshold=0.90)
+        {"name": "Sem(thr=0.30,old)", "similarity_threshold": 0.30, "mu": 0.1, "dynamic_impute": True, "recompute_interval": 200},
+        {"name": "Sem(thr=0.50)",     "similarity_threshold": 0.50, "mu": 0.1, "dynamic_impute": True, "recompute_interval": 200},
+        {"name": "Sem(thr=0.70)",     "similarity_threshold": 0.70, "mu": 0.1, "dynamic_impute": True, "recompute_interval": 200},
+        {"name": "Sem(thr=0.90)",     "similarity_threshold": 0.90, "mu": 0.1, "dynamic_impute": True, "recompute_interval": 200},
+        # μ ablation at fixed thr=0.90 (to verify μ still helps)
+        {"name": "Sem(thr=0.90,μ=0)", "similarity_threshold": 0.90, "mu": 0.0, "dynamic_impute": True, "recompute_interval": 200},
+        {"name": "Sem(thr=0.90,μ=0.5)","similarity_threshold": 0.90, "mu": 0.5, "dynamic_impute": True, "recompute_interval": 200},
     ]
 
     results = []
@@ -146,7 +151,7 @@ def main():
         for cfg in ablation_cfgs:
             run_num += 1
             logger.info(f"[{run_num}/{total}] Running {cfg['name']} @ {cache_pct*100:.0f}%")
-            scfg = {"similarity_threshold": 0.30, "alpha": 1.0, "beta": 1.0, **cfg}
+            scfg = {"alpha": 1.0, "beta": 1.0, **cfg}
             r = run_ablation(embeddings, texts, "semantic", cache_pct, hit_threshold, semantic_cfg=scfg, seed=42)
             r["policy"] = cfg["name"]
             results.append(r)
