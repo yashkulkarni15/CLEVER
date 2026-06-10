@@ -80,6 +80,14 @@ class QueryEncoder:
 
         embeddings = np.array(embeddings, dtype=np.float32)
 
+        # Re-normalize after the float32 cast. sentence-transformers normalizes
+        # internally, but casting (and mixed-precision inference on GPU) leaves
+        # residual norm drift that grows with embedding_dim. Explicitly dividing
+        # by the float32 norm pulls every vector back to unit length.
+        if normalize:
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            np.divide(embeddings, norms, out=embeddings, where=norms > 0)
+
         # Verify shape
         assert embeddings.shape == (len(queries), self.embedding_dim), (
             f"Expected shape ({len(queries)}, {self.embedding_dim}), "
@@ -91,11 +99,16 @@ class QueryEncoder:
         if nan_count > 0:
             logger.warning(f"Found {nan_count} embeddings with NaN values!")
 
-        # Verify normalization
+        # Verify normalization. Use a float32-appropriate tolerance: norm error
+        # accumulates with embedding_dim, so 1e-5 is too strict for 768-dim models.
         if normalize:
             norms = np.linalg.norm(embeddings, axis=1)
-            if not np.allclose(norms, 1.0, atol=1e-5):
-                logger.warning("Some embeddings are not properly L2-normalized")
+            if not np.allclose(norms, 1.0, atol=1e-4):
+                max_dev = np.abs(norms - 1.0).max()
+                logger.warning(
+                    f"Some embeddings are not properly L2-normalized "
+                    f"(max deviation {max_dev:.2e})"
+                )
 
         logger.info(f"Encoding complete: {embeddings.shape}, dtype={embeddings.dtype}")
         return embeddings

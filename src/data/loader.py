@@ -93,6 +93,125 @@ def extract_first_user_queries(dataset, max_rows: Optional[int] = None) -> pd.Da
     return df
 
 
+def extract_moss_queries(
+    records,
+    max_rows: Optional[int] = None,
+    single_turn_only: bool = True,
+) -> pd.DataFrame:
+    """
+    Extract the first human query from each MOSS conversation.
+
+    MOSS (`fnlp/moss-002-sft-data`) stores each English conversation as a dict
+    ``{"id", "prefix", "num_turns", "plain_text"}`` where ``plain_text`` looks
+    like ``"[Human]: <q1><eoh> [MOSS]: <a1><eoa> [Human]: <q2><eoh> ..."``.
+    We take only the FIRST human utterance (the text between the first
+    ``[Human]:`` and the first ``<eoh>``), mirroring the LMSYS loader's
+    "first user turn" semantics so the downstream pipeline is identical.
+
+    Args:
+        records: Iterable of MOSS record dicts (parsed from an ``en_*.json``).
+        max_rows: Optional cap on number of records processed (dev/smoke).
+        single_turn_only: If True, keep only conversations with
+            ``num_turns == 1`` (genuine single-turn exchanges, per the MOSS
+            "medium-density" role). If False, take the first human turn from
+            every conversation regardless of length.
+
+    Returns:
+        DataFrame with the shared schema:
+        [query_id, query_text, original_index, model, language,
+         num_turns, conversation_id].
+    """
+    logger.info("Extracting first human queries from MOSS conversations...")
+
+    human_marker = "[Human]:"
+    eoh_marker = "<eoh>"
+
+    records_out = []
+    for idx, rec in enumerate(records):
+        if max_rows is not None and len(records_out) >= max_rows:
+            break
+
+        num_turns = rec.get("num_turns", 0)
+        if single_turn_only and num_turns != 1:
+            continue
+
+        plain_text = rec.get("plain_text", "") or ""
+        h_pos = plain_text.find(human_marker)
+        if h_pos == -1:
+            continue
+        start = h_pos + len(human_marker)
+        eoh_pos = plain_text.find(eoh_marker, start)
+        query_text = (
+            plain_text[start:eoh_pos] if eoh_pos != -1 else plain_text[start:]
+        ).strip()
+
+        if not query_text:
+            continue
+
+        rec_id = rec.get("id", idx)
+        records_out.append({
+            "query_id": rec_id,
+            "query_text": query_text,
+            "original_index": idx,
+            "model": "moss",
+            "language": "en",
+            "num_turns": num_turns,
+            "conversation_id": f"moss-{rec_id}",
+        })
+
+    df = pd.DataFrame(records_out)
+    logger.info(f"Extracted {len(df)} MOSS queries (single_turn_only={single_turn_only})")
+    return df
+
+
+def extract_qqp_queries(rows, max_rows: Optional[int] = None) -> pd.DataFrame:
+    """
+    Flatten Quora Question Pairs into a deduplicated list of unique questions.
+
+    QQP (`quora-competitions/quora`) is distributed as a TSV with columns
+    ``qid1, question1, qid2, question2, is_duplicate``. The paper uses the
+    *question* text (not the duplicate label), so we flatten every pair into
+    its two questions and deduplicate by question id — the same question
+    appears in many pairs and must be cached once.
+
+    Args:
+        rows: Iterable of TSV row dicts (e.g. from ``csv.DictReader``).
+        max_rows: Optional cap on number of PAIRS processed (dev/smoke).
+
+    Returns:
+        DataFrame with the shared schema:
+        [query_id, query_text, original_index, model, language,
+         num_turns, conversation_id].
+    """
+    logger.info("Extracting unique questions from Quora Question Pairs...")
+
+    seen_qids: set[str] = set()
+    records_out = []
+    for pair_idx, row in enumerate(rows):
+        if max_rows is not None and pair_idx >= max_rows:
+            break
+
+        for qid_key, q_key in (("qid1", "question1"), ("qid2", "question2")):
+            qid = str(row.get(qid_key, "")).strip()
+            text = (row.get(q_key, "") or "").strip()
+            if not qid or not text or qid in seen_qids:
+                continue
+            seen_qids.add(qid)
+            records_out.append({
+                "query_id": int(qid) if qid.isdigit() else qid,
+                "query_text": text,
+                "original_index": len(records_out),
+                "model": "qqp",
+                "language": "en",
+                "num_turns": 1,
+                "conversation_id": f"qqp-{qid}",
+            })
+
+    df = pd.DataFrame(records_out)
+    logger.info(f"Extracted {len(df)} unique Quora questions")
+    return df
+
+
 def save_raw_queries(df: pd.DataFrame, output_path: str | Path) -> Path:
     """Save extracted queries to parquet."""
     output_path = Path(output_path)
