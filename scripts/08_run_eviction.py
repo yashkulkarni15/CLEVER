@@ -48,10 +48,12 @@ import yaml
 # ── Project imports ──────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.data.paths import embeddings_file, queries_file
 from src.cache.semantic_cache import SemanticCache
 from src.cache.eviction.lru import LRUPolicy
 from src.cache.eviction.lfu import LFUPolicy
 from src.cache.eviction.semantic import SemanticPolicy
+from src.cache.eviction.adaptive import AdaptiveHardSwitchPolicy, AdaptiveBlendPolicy
 from src.cache.eviction.oracle import OraclePolicy
 from src.benchmark.workload import generate_workload
 from src.utils.env_check import require_supported_runtime, pin_numpy_threads
@@ -126,6 +128,49 @@ def create_policy(
             mu=sem_cfg.get("mu", 0.1),
             dynamic_impute=sem_cfg.get("dynamic_impute", True),
             seed=seed,
+        )
+    elif policy_name == "adaptive_hard":
+        adaptive_cfg = {
+            **eviction_cfg.get("adaptive", {}),
+            **eviction_cfg.get("adaptive_hard", {}),
+        }
+        return AdaptiveHardSwitchPolicy(
+            similarity_threshold=adaptive_cfg.get(
+                "similarity_threshold",
+                eviction_cfg.get("semantic", {}).get("similarity_threshold", 0.90),
+            ),
+            recompute_interval=adaptive_cfg.get("recompute_interval", 2000),
+            max_redundancy_samples=adaptive_cfg.get("max_redundancy_samples", 1024),
+            density_history_size=adaptive_cfg.get("density_history_size", 64),
+            density_threshold_scale=adaptive_cfg.get("density_threshold_scale", 1.0),
+            density_floor=adaptive_cfg.get("density_floor", 1e-4),
+            frequency_skew_threshold=adaptive_cfg.get("frequency_skew_threshold", 1.5),
+            min_observations=adaptive_cfg.get("min_observations", 50),
+            dynamic_impute=adaptive_cfg.get("dynamic_impute", True),
+            seed=seed,
+        )
+    elif policy_name == "adaptive_blend":
+        adaptive_cfg = {
+            **eviction_cfg.get("adaptive", {}),
+            **eviction_cfg.get("adaptive_blend", {}),
+        }
+        return AdaptiveBlendPolicy(
+            similarity_threshold=adaptive_cfg.get(
+                "similarity_threshold",
+                eviction_cfg.get("semantic", {}).get("similarity_threshold", 0.90),
+            ),
+            recompute_interval=adaptive_cfg.get("recompute_interval", 2000),
+            max_redundancy_samples=adaptive_cfg.get("max_redundancy_samples", 1024),
+            density_history_size=adaptive_cfg.get("density_history_size", 64),
+            density_threshold_scale=adaptive_cfg.get("density_threshold_scale", 1.0),
+            density_floor=adaptive_cfg.get("density_floor", 1e-4),
+            frequency_skew_threshold=adaptive_cfg.get("frequency_skew_threshold", 1.5),
+            min_observations=adaptive_cfg.get("min_observations", 50),
+            dynamic_impute=adaptive_cfg.get("dynamic_impute", True),
+            seed=seed,
+            base_recency_weight=adaptive_cfg.get("base_recency_weight", 1.0),
+            max_frequency_weight=adaptive_cfg.get("max_frequency_weight", 1.0),
+            max_semantic_weight=adaptive_cfg.get("max_semantic_weight", 2.0),
         )
     elif policy_name == "oracle":
         oracle_cfg = eviction_cfg.get("oracle", {})
@@ -574,12 +619,27 @@ def parse_args():
         description="Phase 4: Eviction policy evaluation"
     )
     parser.add_argument(
-        "--embeddings", required=True,
-        help="Path to embeddings .npy file",
+        "--embeddings", default=None,
+        help="Path to embeddings .npy file. If omitted, resolved from "
+             "--dataset/--embedding-model/--size (Option A convention).",
     )
     parser.add_argument(
-        "--queries", required=True,
-        help="Path to queries .parquet file",
+        "--queries", default=None,
+        help="Path to queries .parquet file. If omitted, resolved from "
+             "--dataset/--size.",
+    )
+    parser.add_argument(
+        "--dataset", default=None,
+        help="Dataset name (lmsys/moss/qqp) for path resolution when "
+             "--embeddings/--queries are not given explicitly.",
+    )
+    parser.add_argument(
+        "--embedding-model", default="all-MiniLM-L6-v2",
+        help="Embedding model tag for resolving the embeddings path.",
+    )
+    parser.add_argument(
+        "--size", default="full",
+        help="Scale subset to run (e.g. 10k, 100k, full). Default: full.",
     )
     parser.add_argument(
         "--config", default="configs/eviction.yaml",
@@ -626,6 +686,29 @@ def main():
 
     args = parse_args()
 
+    # Resolve data paths (Option A): explicit --embeddings/--queries win;
+    # otherwise resolve from --dataset/--embedding-model/--size convention.
+    emb_path, qry_path = args.embeddings, args.queries
+    if emb_path is None or qry_path is None:
+        if args.dataset is None:
+            parser_error = (
+                "Provide either --embeddings AND --queries, or --dataset "
+                "(+ optional --embedding-model/--size) to resolve them."
+            )
+            raise SystemExit(parser_error)
+        if emb_path is None:
+            emb_path = str(embeddings_file(
+                "results/embeddings", args.dataset, args.embedding_model, args.size,
+            ))
+        if qry_path is None:
+            qry_path = str(queries_file(args.dataset, args.size))
+        logger.info(
+            f"Resolved paths for dataset={args.dataset} "
+            f"model={args.embedding_model} size={args.size}:"
+        )
+        logger.info(f"  embeddings → {emb_path}")
+        logger.info(f"  queries    → {qry_path}")
+
     # Load config
     config = load_config(args.config)
 
@@ -640,7 +723,7 @@ def main():
         config.setdefault("eviction", {}).setdefault("oracle", {})["use_gpu"] = True
 
     # Load data
-    embeddings, texts = load_data(args.embeddings, args.queries)
+    embeddings, texts = load_data(emb_path, qry_path)
 
     # Determine seeds
     if args.multi_seed:

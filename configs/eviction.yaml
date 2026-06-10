@@ -26,6 +26,20 @@ eviction:
     mu: 0.1                           # Eventual-evictability / LRU+LFU blend constant
     dynamic_impute: true              # Symmetric online neighbour-graph updates on insert
     recompute_interval: 2000          # Full graph rebuild every N evictions (online updates keep it fresh between)
+  adaptive:
+    similarity_threshold: 0.90        # L2² density threshold for adaptive semantic signal
+    recompute_interval: 2000
+    max_redundancy_samples: 1024
+    density_history_size: 64
+    density_threshold_scale: 1.0      # dynamic threshold = median + scale * MAD
+    density_floor: 0.0001             # prevents semantic mode on pure numerical noise
+    frequency_skew_threshold: 1.5     # LFU mode/weight turns on above this skew
+    min_observations: 50
+    dynamic_impute: true
+  adaptive_blend:
+    base_recency_weight: 1.0
+    max_frequency_weight: 1.0
+    max_semantic_weight: 2.0
 
 evaluation:
   warmup_pct: 0.30                    # first 30% of queries warm up the cache
