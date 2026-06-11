@@ -48,16 +48,33 @@ echo "Size:     $SIZE"
 echo "Output:   $OUT_DIR"
 echo ""
 
-python scripts/08_run_eviction.py \
-    --dataset "$DS" \
-    --embedding-model "$MODEL" \
-    --size "$SIZE" \
-    --config configs/eviction.yaml \
-    --output "$OUT_DIR" \
-    --policies lru lfu semantic arc gdsf siso \
-    --cache-sizes 0.10 \
-    --workloads temporal \
-    --multi-seed
+# LMSYS artifacts predate the Option-A nested layout and live at the flat
+# legacy paths (see src/data/paths.py docstring); pass explicit overrides.
+if [[ "$DS" == "lmsys" ]]; then
+    python scripts/08_run_eviction.py \
+        --dataset "$DS" \
+        --embedding-model "$MODEL" \
+        --size "$SIZE" \
+        --embeddings "results/embeddings/${SIZE}_embeddings.npy" \
+        --queries "data/${SIZE}_queries.parquet" \
+        --config configs/eviction.yaml \
+        --output "$OUT_DIR" \
+        --policies lru lfu semantic arc gdsf siso \
+        --cache-sizes 0.10 \
+        --workloads temporal \
+        --multi-seed
+else
+    python scripts/08_run_eviction.py \
+        --dataset "$DS" \
+        --embedding-model "$MODEL" \
+        --size "$SIZE" \
+        --config configs/eviction.yaml \
+        --output "$OUT_DIR" \
+        --policies lru lfu semantic arc gdsf siso \
+        --cache-sizes 0.10 \
+        --workloads temporal \
+        --multi-seed
+fi
 
 echo ""
 echo "=== [$(date)] Phase 4 baseline comparison complete: $DS ==="
