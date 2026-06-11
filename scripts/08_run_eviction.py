@@ -54,6 +54,9 @@ from src.cache.eviction.lru import LRUPolicy
 from src.cache.eviction.lfu import LFUPolicy
 from src.cache.eviction.semantic import SemanticPolicy
 from src.cache.eviction.adaptive import AdaptiveHardSwitchPolicy, AdaptiveBlendPolicy
+from src.cache.eviction.arc import ARCPolicy
+from src.cache.eviction.gdsf import GDSFPolicy
+from src.cache.eviction.siso import SISOPolicy
 from src.cache.eviction.oracle import OraclePolicy
 from src.benchmark.workload import generate_workload
 from src.utils.env_check import require_supported_runtime, pin_numpy_threads
@@ -101,16 +104,19 @@ def create_policy(
     cache_ids: list[int],
     stream_embs: np.ndarray,
     seed: int = 0,
+    capacity: int | None = None,
 ) -> "EvictionPolicy":
     """Create an eviction policy instance from config.
 
     Args:
-        policy_name: One of 'lru', 'lfu', 'semantic', 'oracle'.
+        policy_name: One of 'lru', 'lfu', 'semantic', 'adaptive_hard',
+            'adaptive_blend', 'arc', 'gdsf', 'siso', 'oracle'.
         config: Full experiment config dict.
         cache_embs: Initial cache embeddings (for oracle pre-computation).
         cache_ids: Initial cache IDs.
         stream_embs: Future query stream embeddings (for oracle).
         seed: Base seed forwarded to semantic policy's imputation RNG.
+        capacity: Max cache entries (bounds ARC's ghost lists / target).
     """
     eviction_cfg = config.get("eviction", {})
 
@@ -171,6 +177,34 @@ def create_policy(
             base_recency_weight=adaptive_cfg.get("base_recency_weight", 1.0),
             max_frequency_weight=adaptive_cfg.get("max_frequency_weight", 1.0),
             max_semantic_weight=adaptive_cfg.get("max_semantic_weight", 2.0),
+        )
+    elif policy_name == "arc":
+        arc_cfg = eviction_cfg.get("arc", {})
+        return ARCPolicy(
+            capacity=capacity,
+            ghost_similarity_threshold=arc_cfg.get(
+                "ghost_similarity_threshold", 0.20,
+            ),
+            seed=seed,
+        )
+    elif policy_name == "gdsf":
+        return GDSFPolicy(seed=seed)
+    elif policy_name == "siso":
+        siso_cfg = eviction_cfg.get("siso", {})
+        return SISOPolicy(
+            theta_c=siso_cfg.get("theta_c", 0.86),
+            theta_r=siso_cfg.get("theta_r", 0.86),
+            theta_r_min=siso_cfg.get("theta_r_min", 0.60),
+            theta_r_max=siso_cfg.get("theta_r_max", 0.98),
+            theta_r_step=siso_cfg.get("theta_r_step", 0.02),
+            decay_factor=siso_cfg.get("decay_factor", 1.1),
+            maintenance_interval=siso_cfg.get("maintenance_interval", 1000),
+            adjust_interval=siso_cfg.get("adjust_interval", 100),
+            llm_latency=siso_cfg.get("llm_latency", 1.0),
+            arrival_rate=siso_cfg.get("arrival_rate", 0.5),
+            slo_latency=siso_cfg.get("slo_latency", 1.3),
+            max_merge_samples=siso_cfg.get("max_merge_samples", 1024),
+            seed=seed,
         )
     elif policy_name == "oracle":
         oracle_cfg = eviction_cfg.get("oracle", {})
@@ -321,6 +355,7 @@ def evaluate_policy(
     cache_ids = list(range(n_warmup))
     policy = create_policy(
         policy_name, config, warmup_embs, cache_ids, stream_embs, seed=seed,
+        capacity=max_cache_size,
     )
 
     # ── Build cache ──────────────────────────────────────────────
