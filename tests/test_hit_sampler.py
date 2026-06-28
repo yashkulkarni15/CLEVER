@@ -34,3 +34,11 @@ def test_sample_spreads_across_distance_bins():
     lo = sum(1 for r in out if r["distance_l2sq"] < 0.2)
     hi = sum(1 for r in out if r["distance_l2sq"] >= 0.8)
     assert lo > 0 and hi > 0  # both tails represented
+
+
+def test_topup_branch_is_deterministic_and_exact():
+    recs = _recs(500)
+    a = sample_hits.stratified_sample(recs, n=97, n_bins=5, seed=3)
+    b = sample_hits.stratified_sample(recs, n=97, n_bins=5, seed=3)
+    assert len(a) == 97
+    assert [r["new_query"] for r in a] == [r["new_query"] for r in b]

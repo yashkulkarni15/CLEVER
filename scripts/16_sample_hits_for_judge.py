@@ -41,7 +41,7 @@ def stratified_sample(records: list[dict], n: int, n_bins: int, seed: int) -> li
         chosen.extend(rng.choice(pool, size=take, replace=False).tolist())
     # Top up to exactly n (or as close as the pool allows) from the remainder.
     if len(chosen) < n:
-        remaining = list(set(range(len(records))) - set(chosen))
+        remaining = sorted(set(range(len(records))) - set(chosen))
         if remaining:
             extra = rng.choice(remaining, size=min(n - len(chosen), len(remaining)),
                                replace=False).tolist()
