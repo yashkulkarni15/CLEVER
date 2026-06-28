@@ -310,6 +310,9 @@ def evaluate_policy(
     cache_size_pct: float,
     seed: int,
     workload_type: str = "temporal",
+    log_hits: bool = False,
+    hits_dir: "Path | None" = None,
+    dataset: "str | None" = None,
 ) -> dict:
     """Run a single eviction evaluation for one policy + cache size.
 
@@ -381,6 +384,17 @@ def evaluate_policy(
     rolling_hits = deque(maxlen=rolling_window)
     cumulative_hit_rates = []
 
+    hits_fh = None
+    if log_hits and hits_dir is not None:
+        hits_dir = Path(hits_dir)
+        hits_dir.mkdir(parents=True, exist_ok=True)
+        ds_tag = dataset or "unknown"
+        hits_path = hits_dir / (
+            f"hits_{ds_tag}_{policy_name}_c0p{int(cache_size_pct*100):02d}"
+            f"_seed{seed}_{workload_type}.jsonl"
+        )
+        hits_fh = open(hits_path, "w")
+
     t_stream_start = time.perf_counter()
 
     for i in range(n_stream):
@@ -397,6 +411,20 @@ def evaluate_policy(
         if result.hit:
             n_hits += 1
             rolling_hits.append(1)
+            if hits_fh is not None:
+                matched = result.cache_entry
+                hits_fh.write(json.dumps({
+                    "dataset": dataset or "unknown",
+                    "policy": policy_name,
+                    "cache_size_pct": cache_size_pct,
+                    "seed": seed,
+                    "workload": workload_type,
+                    "stream_idx": i,
+                    "distance_l2sq": round(float(result.distance), 6),
+                    "matched_cache_id": int(matched.cache_id) if matched else -1,
+                    "orig_query": matched.query_text if matched else "",
+                    "new_query": query_text,
+                }) + "\n")
         else:
             rolling_hits.append(0)
             # Insert on miss → may trigger eviction
@@ -422,6 +450,9 @@ def evaluate_policy(
                 )
 
     stream_time = time.perf_counter() - t_stream_start
+
+    if hits_fh is not None:
+        hits_fh.close()
 
     # ── Compute semantic coverage ────────────────────────────────
     t_coverage_start = time.perf_counter()
@@ -482,6 +513,9 @@ def run_full_experiment(
     seeds: list[int],
     max_workers: int = 1,
     checkpoint_path: Path | None = None,
+    log_hits: bool = False,
+    hits_dir: Path | None = None,
+    dataset: str | None = None,
 ) -> dict:
     """Run all policy x cache_size x workload x seed combinations.
 
@@ -559,6 +593,7 @@ def run_full_experiment(
                     res = evaluate_policy(
                         policy_name, embeddings, texts, config,
                         cache_pct, seed, workload_type,
+                        log_hits=log_hits, hits_dir=hits_dir, dataset=dataset,
                     )
                     run_time = time.perf_counter() - t_run
                     run_times.append(run_time)
@@ -712,6 +747,14 @@ def parse_args():
         "--fresh", action="store_true",
         help="Ignore existing checkpoint and start from scratch.",
     )
+    parser.add_argument(
+        "--log-hits", action="store_true",
+        help="Dump per-hit (orig_query, new_query, distance) JSONL for the LLM judge.",
+    )
+    parser.add_argument(
+        "--hits-dir", default=None,
+        help="Directory for --log-hits JSONL output (default: <output>/hits).",
+    )
     return parser.parse_args()
 
 
@@ -777,10 +820,14 @@ def main():
 
     # Run experiment
     t_start = time.perf_counter()
+    hits_dir = Path(args.hits_dir) if args.hits_dir else (output_dir / "hits")
     results = run_full_experiment(
         embeddings, texts, config, seeds,
         max_workers=args.workers,
         checkpoint_path=checkpoint_path,
+        log_hits=args.log_hits,
+        hits_dir=hits_dir if args.log_hits else None,
+        dataset=args.dataset,
     )
     total_time = time.perf_counter() - t_start
 
