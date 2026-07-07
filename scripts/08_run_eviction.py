@@ -36,6 +36,7 @@ Great Lakes (full dataset)::
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from collections import deque
@@ -302,6 +303,22 @@ def _load_checkpoint(path: Path) -> tuple[dict, set[str]]:
 # Core evaluation
 # ═════════════════════════════════════════════════════════════════
 
+def _hits_path(
+    hits_dir: Path,
+    dataset: "str | None",
+    policy_name: str,
+    cache_size_pct: float,
+    seed: int,
+    workload_type: str,
+) -> Path:
+    """Canonical hits-log path for one run (shared by writer and skip check)."""
+    ds_tag = dataset or "unknown"
+    return Path(hits_dir) / (
+        f"hits_{ds_tag}_{policy_name}_c0p{round(cache_size_pct * 100):02d}"
+        f"_seed{seed}_{workload_type}.jsonl"
+    )
+
+
 def evaluate_policy(
     policy_name: str,
     embeddings: np.ndarray,
@@ -313,6 +330,7 @@ def evaluate_policy(
     log_hits: bool = False,
     hits_dir: "Path | None" = None,
     dataset: "str | None" = None,
+    embedding_model: "str | None" = None,
 ) -> dict:
     """Run a single eviction evaluation for one policy + cache size.
 
@@ -384,16 +402,15 @@ def evaluate_policy(
     rolling_hits = deque(maxlen=rolling_window)
     cumulative_hit_rates = []
 
-    hits_fh = None
+    hit_records = None
+    hits_path = None
     if log_hits and hits_dir is not None:
         hits_dir = Path(hits_dir)
         hits_dir.mkdir(parents=True, exist_ok=True)
-        ds_tag = dataset or "unknown"
-        hits_path = hits_dir / (
-            f"hits_{ds_tag}_{policy_name}_c0p{int(cache_size_pct*100):02d}"
-            f"_seed{seed}_{workload_type}.jsonl"
+        hits_path = _hits_path(
+            hits_dir, dataset, policy_name, cache_size_pct, seed, workload_type,
         )
-        hits_fh = open(hits_path, "w")
+        hit_records = []
 
     t_stream_start = time.perf_counter()
 
@@ -411,9 +428,9 @@ def evaluate_policy(
         if result.hit:
             n_hits += 1
             rolling_hits.append(1)
-            if hits_fh is not None:
+            if hit_records is not None:
                 matched = result.cache_entry
-                hits_fh.write(json.dumps({
+                hit_records.append({
                     "dataset": dataset or "unknown",
                     "policy": policy_name,
                     "cache_size_pct": cache_size_pct,
@@ -424,7 +441,8 @@ def evaluate_policy(
                     "matched_cache_id": int(matched.cache_id) if matched else -1,
                     "orig_query": matched.query_text if matched else "",
                     "new_query": query_text,
-                }) + "\n")
+                    "embedding_model": embedding_model or "unknown",
+                })
         else:
             rolling_hits.append(0)
             # Insert on miss → may trigger eviction
@@ -451,8 +469,15 @@ def evaluate_policy(
 
     stream_time = time.perf_counter() - t_stream_start
 
-    if hits_fh is not None:
-        hits_fh.close()
+    # Serialize hits outside the timed loop; atomic rename so a killed run
+    # never leaves a partial .jsonl for the sampler to pick up.
+    if hit_records is not None:
+        tmp_path = hits_path.with_suffix(".jsonl.tmp")
+        with open(tmp_path, "w") as f:
+            for rec in hit_records:
+                f.write(json.dumps(rec) + "\n")
+            f.flush()
+        os.replace(tmp_path, hits_path)
 
     # ── Compute semantic coverage ────────────────────────────────
     t_coverage_start = time.perf_counter()
@@ -516,6 +541,7 @@ def run_full_experiment(
     log_hits: bool = False,
     hits_dir: Path | None = None,
     dataset: str | None = None,
+    embedding_model: str | None = None,
 ) -> dict:
     """Run all policy x cache_size x workload x seed combinations.
 
@@ -577,12 +603,36 @@ def run_full_experiment(
                     key = _ckpt_key(policy_name, cache_pct, workload_type, seed)
 
                     if key in completed_keys:
-                        n_skipped += 1
-                        logger.info(
-                            f"SKIP {run_num}/{total_runs} "
-                            f"(checkpoint): {key}"
-                        )
-                        continue
+                        hits_missing = False
+                        if log_hits and hits_dir is not None:
+                            expected_hits = _hits_path(
+                                hits_dir, dataset, policy_name,
+                                cache_pct, seed, workload_type,
+                            )
+                            hits_missing = not expected_hits.exists()
+                        if hits_missing:
+                            logger.info(
+                                f"RERUN {run_num}/{total_runs} "
+                                f"(checkpointed but hits log missing): "
+                                f"{expected_hits.name}"
+                            )
+                            # Drop the stale checkpoint entry so the re-run
+                            # replaces it instead of duplicating the seed.
+                            runs = all_results[policy_name][f"{cache_pct:.2f}"]
+                            runs[:] = [
+                                r for r in runs
+                                if not (
+                                    r.get("workload", "temporal") == workload_type
+                                    and r["seed"] == seed
+                                )
+                            ]
+                        else:
+                            n_skipped += 1
+                            logger.info(
+                                f"SKIP {run_num}/{total_runs} "
+                                f"(checkpoint): {key}"
+                            )
+                            continue
 
                     logger.info(
                         f"RUN {run_num}/{total_runs}: "
@@ -594,6 +644,7 @@ def run_full_experiment(
                         policy_name, embeddings, texts, config,
                         cache_pct, seed, workload_type,
                         log_hits=log_hits, hits_dir=hits_dir, dataset=dataset,
+                        embedding_model=embedding_model,
                     )
                     run_time = time.perf_counter() - t_run
                     run_times.append(run_time)
@@ -818,9 +869,17 @@ def main():
         checkpoint_path.unlink()
         logger.info("Fresh start: removed existing checkpoint")
 
+    hits_dir = Path(args.hits_dir) if args.hits_dir else (output_dir / "hits")
+    if args.fresh and args.log_hits and hits_dir.exists():
+        stale = sorted(hits_dir.glob("hits_*.jsonl")) + sorted(
+            hits_dir.glob("*.jsonl.tmp")
+        )
+        for p in stale:
+            p.unlink()
+        logger.info(f"Fresh start: removed {len(stale)} stale hits file(s)")
+
     # Run experiment
     t_start = time.perf_counter()
-    hits_dir = Path(args.hits_dir) if args.hits_dir else (output_dir / "hits")
     results = run_full_experiment(
         embeddings, texts, config, seeds,
         max_workers=args.workers,
@@ -828,6 +887,7 @@ def main():
         log_hits=args.log_hits,
         hits_dir=hits_dir if args.log_hits else None,
         dataset=args.dataset,
+        embedding_model=args.embedding_model,
     )
     total_time = time.perf_counter() - t_start
 
