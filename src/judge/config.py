@@ -12,6 +12,9 @@ class JudgeConfig:
     max_concurrency: int = 8
     temperature: float = 0.0
     max_retries: int = 5
+    rpm: float = 25.0
+    max_tokens: int = 16
+    daily_backoff_threshold_s: float = 600.0
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "JudgeConfig":
@@ -29,4 +32,9 @@ class JudgeConfig:
             max_concurrency=int(env.get("JUDGE_MAX_CONCURRENCY", cls.max_concurrency)),
             temperature=float(env.get("JUDGE_TEMPERATURE", cls.temperature)),
             max_retries=int(env.get("JUDGE_MAX_RETRIES", cls.max_retries)),
+            rpm=float(env.get("JUDGE_RPM", cls.rpm)),
+            max_tokens=int(env.get("JUDGE_MAX_TOKENS", cls.max_tokens)),
+            daily_backoff_threshold_s=float(
+                env.get("JUDGE_DAILY_BACKOFF_S", cls.daily_backoff_threshold_s)
+            ),
         )
