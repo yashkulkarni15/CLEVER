@@ -52,3 +52,4 @@ notebooks/*.ipynb
 # HPC logs
 logs/
 slurm-*.out
+.superpowers/
