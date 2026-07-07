@@ -20,13 +20,6 @@ OUT="results/eviction/phase7_loghits_${DS}_minilm_100k_c0p10"
 COMMON=(--config configs/eviction.yaml --policies lru lfu semantic arc gdsf siso
         --cache-sizes 0.10 --output "$OUT" --log-hits --dataset "$DS")
 
-if [ "$DS" = "lmsys" ]; then
-  # LMSYS predates the Option-A nested layout → explicit legacy overrides.
-  python scripts/08_run_eviction.py "${COMMON[@]}" \
-    --embeddings results/embeddings/100k_embeddings.npy \
-    --queries data/100k_queries.parquet
-else
-  python scripts/08_run_eviction.py "${COMMON[@]}" \
-    --embedding-model all-MiniLM-L6-v2 --size 100k
-fi
+python scripts/08_run_eviction.py "${COMMON[@]}" \
+  --embedding-model all-MiniLM-L6-v2 --size 100k
 echo "DONE ${DS}"
