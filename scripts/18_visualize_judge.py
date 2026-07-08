@@ -317,11 +317,6 @@ def plot_quality_adjusted(frame: list[dict], output_dir: Path):
         handles, labels, loc="lower center", ncol=2, frameon=False,
         bbox_to_anchor=(0.5, -0.06),
     )
-    fig.suptitle(
-        "Quality-adjusted hit rate (raw × judged-equivalent fraction) — "
-        "10% cache, MiniLM, n=1000 judged hits/cell",
-        fontsize=9, y=1.02,
-    )
     fig.tight_layout(rect=(0, 0.02, 1, 1))
     _save_fig(fig, output_dir, "judge_quality_adjusted")
 
@@ -361,11 +356,6 @@ def plot_yes_vs_distance(curves: dict, output_dir: Path):
     ax.set_ylabel("Judged equivalent (%)")
     ax.set_ylim(bottom=0)
     ax.legend(frameon=False, loc="upper right")
-    ax.set_title(
-        "Semantic equivalence decays with embedding distance\n"
-        "(deciles per dataset, unique pairs, Wilson 95% bands)",
-        fontsize=9,
-    )
     fig.tight_layout()
     _save_fig(fig, output_dir, "judge_yes_vs_distance")
 

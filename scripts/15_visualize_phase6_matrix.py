@@ -197,12 +197,6 @@ def plot_cache_size_ablation(matrix: dict, output_dir: Path):
         handles, labels, loc="lower center", ncol=6, frameon=False,
         bbox_to_anchor=(0.5, -0.02), columnspacing=1.4, handlelength=1.8,
     )
-    fig.suptitle(
-        "Phase 6 cache-size ablation — negative result replicates across encoders\n"
-        "(absolute hit rates are not comparable across encoders; per-encoder "
-        "hit-threshold calibration)",
-        fontsize=9, y=1.02,
-    )
     fig.tight_layout(rect=(0, 0.04, 1, 1))
     _save_fig(fig, output_dir, "phase6_cache_size_ablation")
 
@@ -262,10 +256,6 @@ def plot_policy_heatmap(matrix: dict, output_dir: Path):
         for b in range(1, len(DATASET_ORDER)):
             ax.axvline(b * 3 - 0.5, color="white", linewidth=2)
 
-    fig.suptitle(
-        "Phase 6 policy hit-rate heatmap (colour normalised within each dataset block)",
-        fontsize=9, y=1.0,
-    )
     fig.tight_layout()
     _save_fig(fig, output_dir, "phase6_policy_heatmap")
 
