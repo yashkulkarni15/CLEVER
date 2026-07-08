@@ -1,0 +1,39 @@
+# Sensitivity-sweep grids for the semantic eviction policy.
+#
+# Consumed by scripts/20_sensitivity_semantic.py, which starts from a base
+# eviction config (default configs/eviction.yaml), overrides the keys below one
+# grid point at a time, runs 08_run_eviction.py, and records the semantic vs
+# LFU hit-rate gap per grid point.
+#
+# Review item addressed: "add sensitivity studies for mu, the semantic neighbor
+# threshold, and theta_e > theta_hit" (reviewer fix-first #4).
+
+base_config: configs/eviction.yaml
+
+# One run is executed per value in each grid (holding the others at their base
+# value). Set `mode: full_grid` to run the Cartesian product instead of the
+# one-at-a-time coordinate sweep.
+mode: coordinate            # coordinate | full_grid
+
+grids:
+  # smoothing constant (semantic.mu). Base = 0.1. When mu >> mean redundancy
+  # r(e) (~2.5e-5 on LMSYS) the semantic term is inert and the policy -> LFU.
+  mu: [0.0, 0.001, 0.01, 0.05, 0.1, 0.25, 0.5]
+
+  # semantic neighbour / redundancy threshold theta_e (semantic.similarity_threshold, L2^2).
+  # Lower = stricter neighbours (sparser graph); higher = looser.
+  similarity_threshold: [0.10, 0.20, 0.30, 0.45, 0.60, 0.90]
+
+  # lookup hit threshold (hit_threshold, L2^2). Vary to probe the theta_e vs
+  # theta_hit relationship the reviewer flagged. Config invariant requires
+  # semantic.similarity_threshold <= hit_threshold.
+  hit_threshold: [0.60, 0.772, 0.90]
+
+# Which cell(s) to sweep. Keep small — each grid point is a full multi-seed run.
+sweep:
+  dataset: lmsys            # lmsys | qqp | moss
+  embedding_model: all-MiniLM-L6-v2
+  size: 100k
+  cache_sizes_pct: [0.10]   # a single capacity keeps the sweep tractable
+  policies: [lfu, semantic] # LFU baseline + the policy under test
+  seeds: [42, 123, 456]
