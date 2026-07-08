@@ -10,9 +10,11 @@ Benchmarking and characterization framework for semantic caching in LLM applicat
 
 ## Overview
 
-CLEVER evaluates the three layers of a semantic LLM cache — ANN indexing, cost-based query routing, and cache eviction — under realistic workloads. Its primary contribution is a rigorous **negative result with a diagnostic**: semantic-aware eviction yields no hit-rate benefit over LFU on sparse real-world workloads while adding 3–8× latency overhead, and a formal workload **density metric** explains when frequency-based policies gain and when semantic redundancy is too weak to exploit.
+CLEVER evaluates the three layers of a semantic LLM cache — ANN indexing, cost-based query routing, and cache eviction — under realistic workloads. Its primary contribution is a rigorous **negative result with a diagnostic**: semantic-aware eviction yields no hit-rate benefit over LFU on sparse real-world workloads while adding 3–8× latency overhead, and a formal workload **density metric** explains when frequency-based policies gain and when semantic redundancy is too weak to exploit. An **LLM-judge audit** then shows the raw hit rates themselves are largely illusory: at the standard similarity threshold, most cache hits are not semantically equivalent queries, and quality-adjusting the hit rate collapses it by an order of magnitude on the sparse workloads.
 
-Experiments span **3 datasets** (LMSYS-Chat-1M, Quora Question Pairs, MOSS) × **2 embedding models** (MiniLM-L6-v2 384-d, gte-base 768-d) × **6 eviction policies** (LRU, LFU, Semantic, ARC, GDSF, SISO) × **3 cache sizes**, all multi-seed (42, 123, 456).
+Experiments span **3 datasets** (LMSYS-Chat-1M, Quora Question Pairs, MOSS) × **2 embedding models** (MiniLM-L6-v2 384-d, gte-base 768-d, with per-encoder threshold calibration) × **6 eviction policies** (LRU, LFU, Semantic, ARC, GDSF, SISO) × **3 cache sizes**, all multi-seed (42, 123, 456), plus a 13.7K-pair LLM-judged hit-quality evaluation.
+
+The paper lives in this repo: source at `main.tex`, compiled draft at `paper/main.pdf`.
 
 ## Datasets
 
@@ -70,6 +72,22 @@ On sparse workloads the embedding space has near-uniform density: nearly every e
 ### Workload Density Characterization
 
 `src/profiler/density.py` measures active-cache density `r(e) = fraction of cached entries within L2² θ of e` during eviction runs. LFU's gains over LRU coincide with higher cache density on QQP (+2.49 pp) and LMSYS (+1.47 pp) and vanish on saturated MOSS. Note that the metric measures *cache-content* density: a dense workload self-deduplicates (near-duplicates are served as hits and never inserted), so cache density can invert raw workload density.
+
+### Cross-Encoder Replication (gte-base)
+
+Re-running the matrix under gte-base with the MiniLM-calibrated hit threshold (L2² 0.90) is **degenerate**: gte-base is anisotropic (random-pair cosine ≈ 0.69–0.76), so every query "hits", eviction never fires, and all policies report a perfect 100% hit rate. After per-encoder recalibration (`configs/eviction_gte.yaml`: hit threshold 0.30 L2² anchored at the gte NN-distance median, with SISO/ARC thresholds moved to the same quantiles), the policy **ordering replicates exactly** — ARC = LFU everywhere, SISO worst on the sparse datasets, all gaps shrinking with capacity — but absolute hit rates do not transfer (LMSYS LFU 76.0% under gte vs 57.0% under MiniLM; QQP runs the other direction). Semantic-cache thresholds must be recalibrated per encoder.
+
+### LLM-Judged Hit Quality (quality-adjusted hit rate)
+
+Every logged cache hit pairs the new query with the cached query it matched. A stratified sample (1,000 hits per dataset×policy cell, 13,669 unique pairs) is judged for query equivalence by a local `llama3.1:8b` (Ollama, temperature 0), cross-validated against Groq's hosted `llama-3.1-8b-instant` on a 1,931-pair overlap (98.55% agreement, Cohen's κ = 0.826).
+
+| Dataset | Raw hit rate | Judged-equivalent | Quality-adjusted |
+|---------|--------------|-------------------|------------------|
+| LMSYS | 50.7–57.0% | 3.1–3.9% | **1.6–2.2%** |
+| QQP | 51.4–60.0% | 2.1–3.1% | **1.1–1.8%** |
+| MOSS | 97.6% | 24.7–27.0% | **24.1–26.4%** |
+
+**Most raw hits are not answers**, and after quality adjustment the differences between eviction policies fall within binomial noise (Wilson 95% CIs overlap in every dataset). Equivalence decays with hit distance, and near-zero embedding distance does not imply equivalence: MiniLM saturates on long templated prompts, so even LMSYS's nearest-decile hits (median L2² 0.10) are only 8.9% equivalent. The operative lever in a semantic cache is the hit threshold and match signal — not the eviction policy.
 
 ## Quick Start
 
@@ -140,6 +158,31 @@ python scripts/08_run_eviction.py \
     --cache-sizes 0.10 --workloads temporal --multi-seed
 ```
 
+### 5. Run the LLM-Judge Pipeline
+
+```bash
+# Log every cache hit during an eviction run (adds hits_seed42.jsonl per run dir)
+python scripts/08_run_eviction.py ... --log-hits
+
+# Stratified sample: 1,000 hits per (dataset, policy) cell
+python scripts/16_sample_hits_for_judge.py \
+    --hits-glob "results/eviction/phase7_loghits_*_minilm_100k_c0p10/hits_*.jsonl" \
+    --out results/judge/phase7_sample_n1000.jsonl --n 1000
+
+# Judge with any OpenAI-compatible endpoint (cp .env.example .env first;
+# local Ollama: JUDGE_BASE_URL=http://localhost:11434/v1, JUDGE_MODEL=llama3.1:8b)
+python scripts/17_run_llm_judge.py \
+    --sample results/judge/phase7_sample_n1000.jsonl \
+    --out-dir results/judge/my_judge_run \
+    --raw-results-glob "results/eviction/phase7_loghits_*_minilm_100k_c0p10/eviction_results.json" \
+    --raw-cache-key 0.10
+
+# Figures + LaTeX table from the verdicts
+python scripts/18_visualize_judge.py --judge-dir results/judge/my_judge_run
+```
+
+The judge runner is crash-safe and resumable: verdicts append to `verdict_cache.jsonl` as they arrive, cached pairs are never re-submitted, and `--max-calls` caps spend on metered APIs.
+
 ## Project Structure
 
 ```
@@ -152,14 +195,17 @@ CLEVER/
 │   │   └── eviction/        #   LRU, LFU, Semantic, ARC, GDSF, SISO, adaptive (ablation), Oracle
 │   ├── router/              # Cost-based adaptive query routing
 │   ├── profiler/            # Workload density profiler
+│   ├── judge/               # LLM judge: config (.env), OpenAI-compatible client, rubric
 │   ├── benchmark/           # Metrics, workload generation, index profiling
 │   ├── evaluation/          # Routing evaluator, analysis
-│   └── utils/               # Manifest generation, environment checks
+│   └── utils/               # Manifest generation, environment checks, results parsing
 ├── scripts/                 # CLI entry points (one per experiment)
-├── configs/                 # YAML experiment configurations
+├── configs/                 # YAML experiment configurations (per-encoder: eviction.yaml, eviction_gte.yaml)
 ├── slurm/                   # Great Lakes HPC job scripts
-├── tests/                   # pytest suite (161 passing)
-├── results/                 # Outputs (embeddings, benchmarks, density, figures)
+├── tests/                   # pytest suite (232 passing)
+├── main.tex                 # Paper source (compiled draft: paper/main.pdf)
+├── paper/                   # Compiled draft, figures, and tables used by the paper
+├── results/                 # Outputs (embeddings, benchmarks, density, judge, figures)
 ├── data/                    # Processed datasets (parquet)
 ├── requirements.txt         # Pinned pip dependencies
 └── environment.yaml         # Conda environment specification
@@ -183,6 +229,10 @@ CLEVER/
 | `12_run_density_profile.py` | Workload density profiling during eviction runs |
 | `13_run_adaptive_subset.py` | Adaptive hard-switch / blended-score comparison |
 | `14_visualize_phase_figures.py` | Density characterization + adaptive comparison figures |
+| `15_visualize_phase6_matrix.py` | Cross-encoder matrix figures (cache-size ablation, policy heatmap) |
+| `16_sample_hits_for_judge.py` | Stratified hit sampling for the LLM judge |
+| `17_run_llm_judge.py` | Resumable LLM-judge runner (any OpenAI-compatible endpoint) |
+| `18_visualize_judge.py` | Quality-adjusted hit-rate figures + LaTeX table |
 
 ### Slurm Jobs (Great Lakes HPC)
 
@@ -199,6 +249,8 @@ CLEVER/
 | Baseline comparison | `slurm/phase4_baselines.sbatch` | CPU array (3), 48 GB |
 | LMSYS gte-base embeddings | `slurm/phase6_embed_lmsys.sbatch` | 1× GPU, 48 GB |
 | Full experiment matrix | `slurm/phase6_full_matrix.sbatch` | CPU array (18), 64 GB |
+| gte-base recalibrated re-run | `slurm/phase6_gte_recal.sbatch` | CPU array (9), 64 GB |
+| Hit logging for the judge | `slurm/phase7_log_hits.sbatch` | CPU array (3), 48 GB |
 
 ## Eviction Policies
 
@@ -242,7 +294,7 @@ eviction:
 pytest tests/ -m "not integration" -v
 ```
 
-161 tests cover the six eviction policies (correctness, edge cases, paper-faithful behaviors), adaptive policies, the density profiler, dataset loaders, path resolution, and multi-seed reproducibility. Integration tests (network-bound model downloads) are deselected for fast local runs.
+232 tests cover the six eviction policies (correctness, edge cases, paper-faithful behaviors), adaptive policies, the density profiler, dataset loaders, path resolution, multi-seed reproducibility, hit logging, the judge sampler/client/runner, and the figure data layers. Integration tests (network-bound model downloads) are deselected for fast local runs.
 
 On macOS, pin threads to avoid a FAISS/OpenMP segfault:
 ```bash
