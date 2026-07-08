@@ -58,3 +58,70 @@ class TestQueriesFile:
 
     def test_default_data_root(self):
         assert queries_file("moss", "full") == Path("data/moss/full_queries.parquet")
+
+
+class TestEmbeddingsFileLegacyFallback:
+    """LMSYS/MiniLM artifacts predate the nested layout: when the nested file
+    is missing but the legacy flat file exists, the resolver returns the
+    legacy path. Everything else keeps the nested path."""
+
+    def test_lmsys_minilm_falls_back_to_legacy_flat(self, tmp_path):
+        legacy = tmp_path / "100k_embeddings.npy"
+        legacy.touch()
+        p = embeddings_file(str(tmp_path), "lmsys", "all-MiniLM-L6-v2", "100k")
+        assert p == legacy
+
+    def test_org_prefixed_minilm_falls_back(self, tmp_path):
+        legacy = tmp_path / "full_embeddings.npy"
+        legacy.touch()
+        p = embeddings_file(
+            str(tmp_path), "lmsys", "sentence-transformers/all-MiniLM-L6-v2", "full"
+        )
+        assert p == legacy
+
+    def test_nested_wins_when_both_exist(self, tmp_path):
+        nested = tmp_path / "lmsys" / "all-MiniLM-L6-v2" / "100k_embeddings.npy"
+        nested.parent.mkdir(parents=True)
+        nested.touch()
+        (tmp_path / "100k_embeddings.npy").touch()
+        p = embeddings_file(str(tmp_path), "lmsys", "all-MiniLM-L6-v2", "100k")
+        assert p == nested
+
+    def test_non_lmsys_never_falls_back(self, tmp_path):
+        (tmp_path / "100k_embeddings.npy").touch()
+        p = embeddings_file(str(tmp_path), "moss", "all-MiniLM-L6-v2", "100k")
+        assert p == tmp_path / "moss" / "all-MiniLM-L6-v2" / "100k_embeddings.npy"
+
+    def test_other_model_never_falls_back(self, tmp_path):
+        (tmp_path / "100k_embeddings.npy").touch()
+        p = embeddings_file(str(tmp_path), "lmsys", "thenlper/gte-base", "100k")
+        assert p == tmp_path / "lmsys" / "gte-base" / "100k_embeddings.npy"
+
+    def test_neither_exists_returns_nested(self, tmp_path):
+        p = embeddings_file(str(tmp_path), "lmsys", "all-MiniLM-L6-v2", "100k")
+        assert p == tmp_path / "lmsys" / "all-MiniLM-L6-v2" / "100k_embeddings.npy"
+
+
+class TestQueriesFileLegacyFallback:
+    def test_lmsys_falls_back_to_legacy_flat(self, tmp_path):
+        legacy = tmp_path / "100k_queries.parquet"
+        legacy.touch()
+        p = queries_file("lmsys", "100k", data_root=str(tmp_path))
+        assert p == legacy
+
+    def test_nested_wins_when_both_exist(self, tmp_path):
+        nested = tmp_path / "lmsys" / "100k_queries.parquet"
+        nested.parent.mkdir()
+        nested.touch()
+        (tmp_path / "100k_queries.parquet").touch()
+        p = queries_file("lmsys", "100k", data_root=str(tmp_path))
+        assert p == nested
+
+    def test_non_lmsys_never_falls_back(self, tmp_path):
+        (tmp_path / "100k_queries.parquet").touch()
+        p = queries_file("moss", "100k", data_root=str(tmp_path))
+        assert p == tmp_path / "moss" / "100k_queries.parquet"
+
+    def test_neither_exists_returns_nested(self, tmp_path):
+        p = queries_file("lmsys", "100k", data_root=str(tmp_path))
+        assert p == tmp_path / "lmsys" / "100k_queries.parquet"
