@@ -1,0 +1,90 @@
+# ── Eviction experiment configuration — gte-base ENCODER ──────────
+# Used by scripts/08_run_eviction.py for the gte-base (768d) half of the
+# Phase 6 matrix. Identical to configs/eviction.yaml EXCEPT for the five
+# similarity thresholds, which are recalibrated per encoder.
+#
+# WHY A SEPARATE CONFIG: gte-base is strongly anisotropic — random query
+# pairs sit at mean cosine ≈ 0.69–0.76 (vs ≈ 0 for MiniLM). The MiniLM-tuned
+# hit_threshold (0.90 L2² = cos 0.55) therefore admits ~100% of all pairs on
+# gte, so every query hits, eviction never fires, and all policies collapse to
+# an identical 100.00% hit rate (the degenerate Phase-6 gte cells). Thresholds
+# must occupy the same statistical position in EACH encoder's similarity
+# distribution. The MiniLM values are unchanged; use configs/eviction.yaml
+# for the MiniLM half.
+#
+# CALIBRATION (verified on the 100k gte embeddings, all unit-norm):
+#   hit_threshold 0.30 L2² (cos 0.85)  — anchored at gte's nearest-neighbour
+#     median (MiniLM's 0.55 sits at MiniLM's NN median 0.553). Harness-validated
+#     (qqp/seed42/10%): LRU .527 LFU .554 Sem .540 ARC .555 GDSF .549 SISO .475
+#     — non-degenerate, eviction fires, policies separate (LFU≥LRU +2.7pp,
+#     mirrors MiniLM qqp +2.5pp); moss stays saturated .9894 with 744 evictions.
+#   semantic.similarity_threshold 0.30  — kept equal to hit_threshold (MiniLM
+#     convention; must satisfy ≤ hit_threshold).
+#   siso.theta_c / theta_r 0.94 (cos)   — clustering/retrieval anchored in gte's
+#     deep random-pair tail (≥99.9th pct), matching where 0.86 sits for MiniLM;
+#     theta_r_min raised 0.60→0.85 so the dynamic θ_R cannot wander below gte's
+#     random-pair mean (~0.74).
+#   arc.ghost_similarity_threshold 0.10 L2² (cos 0.95)  — tightened from 0.20;
+#     at 0.20 ghost hits fire on 47–89% of merely-topical gte neighbours,
+#     corrupting ARC's adaptive-p signal. 0.10 isolates "same query re-issued".
+
+cache:
+  index_type: hnsw
+  index_params:
+    M: 32
+    efConstruction: 128
+    efSearch: 128
+  cache_sizes_pct: [0.10, 0.20, 0.30]  # fraction of unique queries
+
+eviction:
+  policies: [lru, lfu, semantic]
+  oracle:
+    refresh_interval: 5000
+    horizon: 50000
+  semantic:
+    similarity_threshold: 0.30        # gte: = hit_threshold (cos 0.85). Was 0.90.
+    alpha: 1.0                        # recency weight
+    beta: 1.0                         # frequency weight
+    mu: 0.1                           # Eventual-evictability / LRU+LFU blend constant
+    dynamic_impute: true              # Symmetric online neighbour-graph updates on insert
+    recompute_interval: 2000          # Full graph rebuild every N evictions
+  adaptive:
+    similarity_threshold: 0.30        # gte: mirror semantic (cos 0.85). Was 0.90.
+    recompute_interval: 2000          # (adaptive policies are NOT in the matrix; kept correct)
+    max_redundancy_samples: 1024
+    density_history_size: 64
+    density_threshold_scale: 1.0
+    density_floor: 0.0001
+    frequency_skew_threshold: 1.5
+    min_observations: 50
+    dynamic_impute: true
+  adaptive_blend:
+    base_recency_weight: 1.0
+    max_frequency_weight: 1.0
+    max_semantic_weight: 2.0
+  arc:
+    ghost_similarity_threshold: 0.10  # gte: L2² ≈ cos 0.95 (was 0.20 / cos 0.90)
+  gdsf: {}                            # cost/size derived from embeddings; no knobs
+  siso:                               # Kim et al., arXiv:2508.18736
+    theta_c: 0.94                     # gte clustering/merge threshold (cosine). Was 0.86.
+    theta_r: 0.94                     # gte initial retrieval threshold (cosine). Was 0.86.
+    theta_r_min: 0.85                 # raised from 0.60 (gte random mean ≈ 0.74)
+    theta_r_max: 0.98
+    theta_r_step: 0.02
+    decay_factor: 1.1
+    maintenance_interval: 1000
+    adjust_interval: 100
+    llm_latency: 1.0
+    arrival_rate: 0.5
+    slo_latency: 1.3
+    max_merge_samples: 1024
+
+evaluation:
+  warmup_pct: 0.30                    # first 30% of queries warm up the cache
+  hit_threshold: 0.30                 # gte: L2² hit threshold (cos 0.85). Was 0.90.
+  rolling_window: 1000
+  log_interval: 500
+  workloads: [temporal]
+
+seed: 42
+seeds: [42, 123, 456]
