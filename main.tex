@@ -43,7 +43,7 @@ approximate nearest neighbor, HNSW, LMSYS, LLM-as-judge,
 quality-adjusted hit rate, negative results}
 
 \setcopyright{none}
-\acmConference{}{}{}
+\acmConference[CSE 584]{CSE 584: Advanced Database Systems, Course Project}{Winter 2026}{Ann Arbor, MI}
 \acmISBN{}
 \acmDOI{}
 \acmPrice{}
@@ -53,7 +53,7 @@ quality-adjusted hit rate, negative results}
 \begin{abstract}
 The latency and computational cost of Large Language Model (LLM) serving can be significantly reduced using semantic caching, which retrieves historical responses for semantically similar queries. While optimizing cache indexing and query routing is well-studied, cache eviction (the problem of which embeddings to discard when capacity is reached) remains underexplored. We introduce CLEVER, a framework that evaluates Approximate Nearest Neighbor (ANN) indexes, implements a cost-aware adaptive router, and proposes a novel semantic-aware eviction policy that scores entries by the ratio of their semantic redundancy to their utility. We evaluate six eviction policies (LRU, LFU, ARC, GDSF, the recent SISO, and our semantic policy) on three workloads (LMSYS-Chat-1M, Quora Question Pairs, MOSS), under two embedding models, and audit the semantic validity of cache hits with an LLM judge.
 
-We demonstrate that HNSW is the Pareto-optimal index and that adaptive routing achieves 60.33\% mean latency savings across five seeds. Our central findings, however, are negative. First, no policy beats LFU at any cache size on any workload: ARC converges to LFU's decisions, SISO---designed specifically for LLM serving---is the worst policy on both sparse workloads, and every policy gap shrinks monotonically with capacity, vanishing by a 30\% cache. The ordering replicates under a second encoder, although hit thresholds themselves do not transfer across encoders and must be recalibrated per encoder. Second, an LLM judge finds that most cache hits are not semantically equivalent queries: quality-adjusted hit rates collapse from 51--60\% to 1--2\% on LMSYS and QQP and from 98\% to 25\% on MOSS, and the residual differences between policies fall within binomial noise. Meanwhile the semantic policy adds 5.83--8.24$\times$ per-query overhead relative to LRU. We conclude that the binding constraint in semantic caching is hit \emph{quality}, not eviction: LFU is the dominant, cost-effective eviction strategy, and effort is better spent on per-encoder threshold calibration than on semantically informed eviction.
+We demonstrate that HNSW is the Pareto-optimal index and that adaptive routing achieves 60.33\% mean latency savings across five seeds. Our central findings, however, are negative. First, no policy beats LFU at any cache size on any workload. ARC converges to LFU's decisions, SISO (a policy designed specifically for LLM serving) is the worst policy on both sparse workloads, and every policy gap shrinks monotonically with capacity, vanishing at a 30\% cache. The ordering replicates under a second encoder, although hit thresholds themselves do not transfer across encoders and must be recalibrated per encoder. Second, an LLM judge finds that most cache hits are not semantically equivalent queries: quality-adjusted hit rates collapse from 51--60\% to 1--2\% on LMSYS and QQP and from 98\% to 25\% on MOSS, and the residual differences between policies fall within binomial noise. The semantic policy also adds 5.83--8.24$\times$ per-query overhead relative to LRU. We conclude that the binding constraint in semantic caching is hit quality, not eviction: LFU is the dominant, cost-effective eviction strategy, and effort is better spent on per-encoder threshold calibration than on semantically informed eviction.
 \end{abstract}
 \maketitle
 
@@ -75,12 +75,12 @@ However, our empirical evaluation refutes our initial hypothesis for general-pur
 
 \textbf{Contributions.} This paper makes the following contributions:
 \begin{enumerate}
-\item \textbf{ANN Index Benchmark:} A systematic comparison of FAISS index structures (Flat, HNSW, IVF, LSH) under realistic semantic caching workloads, establishing HNSW as the Pareto-optimal choice (Recall@1 $= 0.998$, $P50 = 0.171$ ms at $M{=}64$, $ef{=}256$).
+\item \textbf{ANN Index Benchmark:} A systematic comparison of FAISS index structures (Flat, HNSW, IVF, LSH) under realistic semantic caching workloads on 499K vectors, establishing HNSW as the Pareto-optimal choice (Recall@1 $= 0.989$ at $P50 = 0.52$ ms, a $34\times$ speedup over exact search for a 1.1\,pp recall loss).
 \item \textbf{Adaptive Cost-Based Router:} A threshold-selection algorithm that maximizes a joint objective of latency savings and semantic quality, achieving 60.33\% mean latency savings across five seeds on LMSYS-Chat-1M.
 \item \textbf{Semantic Eviction Policy:} A novel scoring function and $O(S)$ incremental symmetric redundancy graph that grades cache entries by redundancy-to-utility ratio with $\mu$-smoothing to guarantee graceful fallback.
 \item \textbf{Negative Empirical Result:} A rigorous demonstration that, on high-diversity conversational workloads, semantic eviction provides no hit-rate benefit over LFU while adding $5.83$--$8.24\times$ per-query overhead, establishing clear workload-dependency conditions for when semantic eviction is cost-effective.
 \item \textbf{Six-Policy, Cross-Encoder Robustness Study:} An extension of the negative result to ARC, GDSF, and SISO across three workloads, three cache capacities, and two embedding models, showing that LFU is never beaten, that all policy gaps vanish as capacity grows, and that semantic-cache hit thresholds do not transfer across encoders and must be recalibrated per encoder.
-\item \textbf{LLM-Judged Quality Adjustment:} An audit of hit quality showing that most cache hits at the standard threshold are not semantically equivalent queries. Quality-adjusted hit rates collapse from 51--60\% to 1--2\% on LMSYS and QQP, policy differences flatten into binomial noise, and near-zero embedding distance does not imply equivalence on templated prompts.
+\item \textbf{LLM-Judged Quality Adjustment:} An audit of hit quality showing that most cache hits at the standard threshold are not semantically equivalent queries. Quality-adjusted hit rates collapse from 51--60\% to 1--2\% on LMSYS and QQP, policy differences fall within binomial noise, and near-zero embedding distance does not imply equivalence on templated prompts.
 \end{enumerate}
 
 \section{Related Work}
@@ -99,7 +99,7 @@ Semantic caching is motivated by the broader success of retrieval-augmented gene
 However, retrieval is not universally beneficial. Mallen et al.\ \cite{mallen2023trust} show that retrieval augmentation can actively hurt performance on facts well-memorized by parametric models, and Liu et al.\ \cite{liu2024lost} demonstrate that LLMs frequently fail to effectively utilize retrieved context positioned in the middle of long inputs. These results establish that the benefit of non-parametric retrieval is workload-dependent, a finding that directly motivates CLEVER's empirical approach to evaluating when semantic caching provides genuine value versus when simpler frequency-based policies dominate.
 
 \section{System Architecture and Methodology}
-CLEVER is built upon three modular components evaluated in sequence.
+CLEVER is organized as a sequence of modular components: an index benchmark, a cost-based router, an eviction layer hosting six interchangeable policies, and an LLM-based audit of hit quality. This section describes each in turn.
 
 \subsection{Index Benchmarking}
 We wrap and evaluate four FAISS \cite{johnson2019faiss} index structures to determine the optimal backend for semantic caching:
@@ -153,17 +153,18 @@ Computing $r(e)$ naively requires $O(N^2)$ distance calculations per eviction. W
 To test whether the negative result is an artifact of comparing against only LRU and LFU, we add three further baselines spanning adaptive, cost-aware, and LLM-cache-specific designs. Each must be adapted to a semantic cache, where entries are unit-norm embeddings and cache ids are slot-unique (an evicted id is never re-requested).
 
 \textbf{ARC} \cite{megiddo2003arc} balances a recency list $T_1$ against a frequency list $T_2$ using ghost lists $B_1$/$B_2$ of recently evicted keys; a request for a ghosted key adapts the target split $p$. Because our cache ids are slot-unique, a classic exact-match ghost hit can never fire. Our adaptation detects ghost hits \emph{semantically}: each ghost retains the evicted entry's embedding, and an inserted query whose embedding lies within
-$L_2^2 \le 0.20$ of a ghost (cosine ${\approx}\,0.90$ for unit-norm MiniLM vectors) counts as a ghost hit --- the semantic-cache analogue of re-requesting a recently evicted item. On a match, $p$ adapts with the classic deltas, the ghost is retired, and the new entry is admitted directly to $T_2$; ghost lists are LRU-bounded at capacity $c$.
+$L_2^2 \le 0.20$ of a ghost (cosine ${\approx}\,0.90$ for unit-norm MiniLM vectors) counts as a ghost hit. This is the semantic-cache analogue of re-requesting a recently evicted item. On a match, $p$ adapts with the classic deltas, the ghost is retired, and the new entry is admitted directly to $T_2$; ghost lists are LRU-bounded at capacity $c$.
 
 \textbf{GDSF} \cite{cherkasova1998gdsf} assigns each entry the priority $L + \mathit{frequency}(e) \cdot \mathit{cost}(e)/\mathit{size}(e)$, where the inflation clock $L$ rises to each victim's priority (aging). We instantiate $\mathit{cost}(e) = 1/\lVert e \rVert$ and $\mathit{size}(e)$ as the embedding dimension. On unit-norm, fixed-dimension embeddings every entry has $\mathit{cost} \approx 1$ and identical size, so the cost/size term is uniform and GDSF reduces to \emph{LFU-with-aging}; the general formula is implemented regardless.
 
 \textbf{SISO} \cite{kim2025siso} is a recent (August 2025) caching policy designed specifically for LLM serving. Each cached entry acts as a cluster centroid carrying a \emph{cluster size} (semantic locality, long-term value) and an \emph{access count} (short-term popularity). On insert, the closest cached entry within the clustering threshold
 $\theta_C = 0.86$ cosine ($L_2^2 < 0.28$) absorbs one unit of cluster mass; an insert that opens a new semantic region receives temporary infinite-access-count protection. Every 1{,}000 requests a maintenance round decays all cluster sizes by $1.1\times$ and resets access counts; eviction removes the entry with the lexicographically smallest (cluster size, access count) pair. SISO's original cache manager re-clusters query logs offline; our implementation maps its merge step to online per-insert merging with the search bounded at 1{,}024 sampled entries, and drives its M/D/1-based adaptive retrieval threshold $\theta_R$ from a sliding-window hit rate. As in the original design, $\theta_R$ does not influence victim selection.
 
-All six policies (LRU, LFU, Semantic, ARC, GDSF, SISO) run under the identical harness (\texttt{scripts/08\_run\_eviction.py}): the policy only observes insert/access/evict events and selects victims, while admission, lookup, the
+All six policies (LRU, LFU, Semantic, ARC, GDSF, SISO) run under an identical harness: the policy only observes insert, access, and evict events and selects victims, while admission, lookup, the
 $L_2^2 = 0.90$ hit threshold, and the 30\% warmup prefix are fixed by the cache.
 
 \subsection{Per-Encoder Threshold Calibration}
+\label{sec:calibration}
 Similarity thresholds are not portable across embedding models. Our MiniLM
 configuration uses an $L_2^2$ hit threshold of $0.90$ (cosine $\geq 0.55$),
 which sits at MiniLM's median nearest-neighbor cosine similarity ($0.553$)
@@ -181,7 +182,7 @@ anchoring it at the same quantile of the gte similarity distribution that the
 MiniLM value occupies in MiniLM's. The hit threshold becomes $0.30$ $L_2^2$
 (cosine $0.85$), the gte nearest-neighbor median; the semantic policy's
 redundancy threshold moves with it ($0.30$, preserving the invariant that two
-cached entries are neighbors iff one would be a hit for the other). SISO's
+cached entries are neighbors if and only if one would be a hit for the other). SISO's
 clustering and retrieval thresholds move from cosine $0.86$ to $0.94$
 (the deep random-pair tail under both encoders), with its dynamic-threshold
 floor raised from $0.60$ to $0.85$ so it cannot wander below gte's random-pair
@@ -227,7 +228,8 @@ independently re-judged by \texttt{llama-3.1-8b-instant} on Groq's
 hosted API under the identical rubric and decoding configuration.
 
 \subsection{Hyperparameter Configuration}
-\noindent %
+Table~\ref{tab:hyperparams} summarizes the hyperparameters of the semantic eviction policy and the adaptive router. All values were fixed before the evaluation runs and held constant across datasets, cache capacities, and seeds. The two distance thresholds ($\theta_r$, $\theta_e$) are the MiniLM values; they are the only parameters that change between encoders, following the recalibration procedure of Section~\ref{sec:calibration}. The smoothing constant $\mu$ and the recency floor exist to keep the policy well defined when the redundancy signal is weak, a safeguard whose consequences Section~\ref{sec:mu} examines in detail.
+
 \begin{table}[h]
 \caption{Hyperparameter configuration for CLEVER's semantic
 eviction policy and adaptive router.}
@@ -265,31 +267,33 @@ Eviction threshold  & $\theta_e$    & 0.90       & Semantic neighbor cutoff \\
 \section{Results}
 
 \subsection{Index Benchmarking}
-Index benchmarking was conducted on 499K vectors drawn from the full embedding corpus. At this scale, HNSW ($M=64$, $ef=256$) achieves a Recall@1 of 0.998 with a P50 search latency of 0.171 ms, versus 0.182 ms for exact Flat search. IVF suffers from severe recall degradation at low probe counts (Recall@1 = 0.641 at nprobe=1), and LSH fails to exceed 0.75 recall, rendering it non-viable for semantic caching.
+Index benchmarking was conducted on 499K vectors drawn from the full embedding corpus, under a uniform query workload. At this scale, HNSW ($M{=}32$, $\mathit{efConstruction}{=}256$, $\mathit{efSearch}{=}256$) achieves a Recall@1 of 0.989 with a P50 search latency of 0.52 ms, versus 17.4 ms for exact Flat search: a $34\times$ speedup for a 1.1\,pp recall loss. IVF reaches comparable recall only at high probe counts (0.989 at $\mathit{nlist}{=}1024$, $\mathit{nprobe}{=}128$), where its P50 rises to 2.5 ms, roughly five times HNSW's, and it degrades sharply at low probe counts (0.761 at $\mathit{nprobe}{=}1$). LSH does not exceed 0.761 recall even at 1,536 bits, rendering it non-viable for semantic caching. HNSW traces the Pareto frontier up to Recall@1 $= 0.989$; beyond that point, only near-exhaustive scans buy the last fraction of recall, at an order-of-magnitude latency cost (Fig.~\ref{fig:hnsw}).
 
 \begin{figure}[h!]
   \centering
   \includegraphics[width=\columnwidth]{hnsw_pareto_tradeoff}
-  \caption{Recall@1 vs.\ P50 latency across FAISS index types.
-  HNSW is the Pareto-optimal choice; IVF and LSH fall below
-  viable recall thresholds.}
+  \caption{Recall@1 vs.\ P50 search latency (log scale) for all
+  index configurations on 499K vectors, uniform workload. HNSW
+  traces the Pareto frontier up to Recall@1 $=$ 0.989 at 0.52 ms;
+  exact Flat search pays 17.4 ms for perfect recall.}
   \label{fig:hnsw}
 \end{figure}
 
 \subsection{Adaptive Routing}
-The adaptive router identifies a practical operating region around $\theta \in [0.76, 0.79]$. In five-seed evaluation under random cache fill, the mean selected threshold is $\theta = 0.772 \pm 0.015$, yielding a 60.43\% hit rate, average cosine quality of 0.806, and 60.33\% latency savings. For reference, the fixed-threshold single-seed sweep at $\theta = 0.70$ yields 71.56\% hit rate, cosine quality 0.858, and 71.46\% latency savings. Pushing $\theta > 0.90$ increases hit rate but drives quality toward the acceptance floor.
+The adaptive router identifies a practical operating region around $\theta \in [0.76, 0.79]$. In five-seed evaluation under random cache fill, the mean selected threshold is $\theta = 0.772 \pm 0.015$, yielding a 60.43\% hit rate, average cosine quality of 0.806, and 60.33\% latency savings. The full sweep (Fig.~\ref{fig:router}) shows why the router settles in this region: hit rate and latency savings rise together as the threshold loosens, while the mean cosine similarity of accepted hits falls. Beyond $\theta = 0.90$, additional hits come almost entirely from low-quality accepts; the mean accepted-hit cosine drops from 0.76 at $\theta = 0.9$ to 0.69 at $\theta = 1.5$, where every query is accepted.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{router_threshold_sweep}
-  \caption{Hit rate, cosine quality, and cost savings vs.\
-  routing threshold $\theta$. Adaptive selection centers at
-  $\theta = 0.772$ across five seeds.}
+  \caption{Five-seed mean threshold sweep under random cache
+  fill. Hit rate and latency savings rise as the threshold
+  loosens while accepted-hit quality falls; the adaptive router
+  settles at $\theta = 0.772 \pm 0.015$ (shaded band).}
   \label{fig:router}
 \end{figure}
 
 \subsection{Cache Eviction Performance}
-Despite the theoretical advantages of optimizing semantic coverage, the semantic eviction policy provided zero empirical benefit on the LMSYS workload.
+Despite the theoretical advantages of optimizing semantic coverage, the semantic eviction policy provided zero empirical benefit on the LMSYS workload. Table~\ref{tab:hit-rate} reports hit rates for LRU, LFU, and the semantic policy on the full 579,753-query stream. At 10\% capacity, LFU leads the semantic policy by 0.27\,pp and LRU by 0.33\,pp; at 20\% and 30\% capacity, all three policies agree to four decimal places. Seed variance is below reporting precision, so these small differences are stable, but they carry no practical significance.
 
 \begin{table}[t]
 \caption{Cache hit rate (mean $\pm$ std) across three seeds
@@ -315,7 +319,8 @@ $\pm$0.0001 as shown. Variance is non-zero but below
 reporting precision.}
 \end{table}
 
-\textbf{Runtime Overhead Breakdown:}
+\paragraph{Runtime overhead.}
+Table~\ref{tab:latency} reports mean per-query processing time for the same runs.
 
 \begin{table}[t]
 \caption{Mean per-query processing time across three seeds.
@@ -346,11 +351,11 @@ In the same runs, semantic policy statistics report mean eviction computation ti
 \subsection{Six-Policy, Three-Dataset Matrix}
 We extend the eviction evaluation to all six policies on three workloads, each preprocessed into a 100{,}000-query temporal stream: LMSYS-Chat-1M, QQP \cite{iyer2017qqp} (Quora question pairs), chosen as a high-redundancy workload of near-duplicate questions, and MOSS \cite{sun2024moss}, an English synthetic-instruction corpus whose templated queries saturate any cache and serve as a control. Cache capacities are 10\%, 20\%, and 30\% of the stream, with three seeds (42, 123, 456) per cell. Figure~\ref{fig:heatmap} reports the full hit-rate matrix and Figure~\ref{fig:ablation} the capacity ablation.
 
-LFU is never beaten: across all 9 dataset--capacity cells, no policy exceeds LFU's hit rate by more than 0.05\,pp. On the sparse workloads at 10\% capacity, LFU reaches 57.0\% (LMSYS) and 60.0\% (QQP). ARC ties LFU to within 0.01\,pp in every cell: its adaptation parameter only moves on semantic ghost hits, which are as rare as the redundancy signal itself, so ARC degenerates to its frequency list and inherits LFU's behavior. GDSF, as predicted by its reduction to LFU-with-aging, trails LFU by at most 0.48\,pp (QQP, 10\%) --- the aging clock's only effect --- and is otherwise indistinguishable.
+LFU is never beaten: across all 9 dataset--capacity cells, no policy exceeds LFU's hit rate by more than 0.05\,pp. On the sparse workloads at 10\% capacity, LFU reaches 57.0\% (LMSYS) and 60.0\% (QQP). ARC ties LFU to within 0.01\,pp in every cell. Its adaptation parameter only moves on semantic ghost hits, which are as rare as the redundancy signal itself, so ARC degenerates to its frequency list and inherits LFU's behavior. GDSF, as predicted by its reduction to LFU-with-aging, trails LFU by at most 0.48\,pp (QQP, 10\%), the aging clock's only visible effect, and is otherwise indistinguishable.
 
-SISO --- the one policy purpose-built for LLM caches --- is the \emph{worst} performer on both sparse datasets at every capacity, trailing LFU by 6.3, 4.2, and 1.4\,pp on LMSYS and by 8.5, 4.7, and 1.0\,pp on QQP at 10\%, 20\%, and 30\% capacity: its cluster-size signal suffers the same sparsity collapse as our semantic policy, while its maintenance rounds discard the frequency history that LFU exploits. Both deficits shrink monotonically with capacity, and the same convergence applies at the top of the ranking: LFU's lead over LRU falls from 1.5\,pp (LMSYS) and 2.5\,pp (QQP) at 10\% capacity to 0.2\,pp at 20\% and to below 0.01\,pp at 30\%. Capacity, not policy, dominates hit rate (Fig.~\ref{fig:ablation}); as the cache grows, every policy gap collapses toward zero.
+SISO, the one policy in our set designed specifically for LLM caches, performs worst on both sparse datasets at every capacity, trailing LFU by 6.3, 4.2, and 1.4\,pp on LMSYS and by 8.5, 4.7, and 1.0\,pp on QQP at 10\%, 20\%, and 30\% capacity. Its cluster-size signal suffers the same sparsity collapse as our semantic policy, while its maintenance rounds discard the frequency history that LFU exploits. Both deficits shrink monotonically with capacity, and the same convergence applies at the top of the ranking: LFU's lead over LRU falls from 1.5\,pp (LMSYS) and 2.5\,pp (QQP) at 10\% capacity to 0.2\,pp at 20\% and to below 0.01\,pp at 30\%. Capacity, not policy, dominates hit rate (Fig.~\ref{fig:ablation}); as the cache grows, every policy gap collapses toward zero.
 
-MOSS behaves as intended for a control: all six policies land between 97.6\% (10\%) and 98.7\% (30\%), within 0.02\,pp of one another at each capacity --- a saturated cache is uninformative for policy ordering. Seed variance is negligible throughout: the maximum hit-rate standard deviation across all 54 policy cells is $2.2 \times 10^{-4}$ (0.02\,pp), so the orderings above are essentially deterministic. The hit-rate losses buy no speed either: at 10\% capacity, SISO's mean stream-processing time is $3.5\times$ LRU's on LMSYS and $3.1\times$ on QQP, with our semantic policy at $4.3\times$ and $3.8\times$ respectively; only on saturated MOSS, where evictions are rare, does the overhead collapse (SISO $1.3\times$ LRU).
+MOSS behaves as intended for a control: all six policies land between 97.6\% (10\%) and 98.7\% (30\%), within 0.02\,pp of one another at each capacity, because a saturated cache is uninformative for policy ordering. Seed variance is negligible throughout: the maximum hit-rate standard deviation across all 54 policy cells is $2.2 \times 10^{-4}$ (0.02\,pp), so the orderings above are essentially deterministic. SISO's hit-rate deficit is not compensated by lower cost either. At 10\% capacity, its mean stream-processing time is $3.5\times$ LRU's on LMSYS and $3.1\times$ on QQP, with our semantic policy at $4.3\times$ and $3.8\times$ respectively; only on saturated MOSS, where evictions are rare, does the overhead collapse (SISO $1.3\times$ LRU).
 
 \begin{figure}[t]
   \centering
@@ -406,9 +411,9 @@ at $10\%$ capacity, LFU achieves $0.760$ on LMSYS under gte-base versus
 $0.570$ under MiniLM ($+19.0$pp), yet $0.554$ versus $0.600$ on QQP
 ($-4.6$pp). The differences are large and not even direction-consistent,
 so hit rates measured under one encoder cannot be used to provision a cache
-served by another. Only the relative conclusion---frequency-based eviction
-dominates, semantic and workload-aware alternatives add cost without
-benefit---transfers.
+served by another. What does transfer is the relative conclusion:
+frequency-based eviction dominates, and semantic and workload-aware
+alternatives add cost without benefit.
 
 \subsection{Quality-Adjusted Hit Rate}
 \begin{table*}[t]
@@ -443,7 +448,8 @@ of all six policies overlap.}
 \end{figure}
 
 Table~\ref{tab:judge} and Figure~\ref{fig:qadj} show the central
-result: at the 0.90 hit threshold, most raw hits are not answers.
+result: at the 0.90 hit threshold, most of the matches counted by the
+raw hit rate do not answer the incoming query.
 On LMSYS, raw hit rates of 50.7--57.0\% shrink to quality-adjusted
 rates of 1.6--2.2\% (judged-YES fractions of 3.1--3.9\%); on QQP,
 51.4--60.0\% shrinks to 1.1--1.8\% (YES 2.1--3.1\%). Even on MOSS, the
@@ -457,21 +463,22 @@ policies overlap (Table~\ref{tab:judge}), so at $n{=}1000$ per cell
 the observed spreads are indistinguishable from binomial noise. The
 inversion on MOSS is illustrative: SISO, the worst policy by raw hit
 rate on the other datasets, attains the numerically highest YES rate
-(27.0\%), because admitting-then-evicting quickly is no worse than
-careful retention when retention preserves mostly non-equivalent hits.
+(27.0\%). Rapid turnover costs nothing when the entries a careful
+policy would have retained produce mostly non-equivalent hits anyway.
 
-Figure~\ref{fig:yesdist} exposes the mechanism: equivalence decays
-with distance, but each dataset fails differently. MOSS falls from
+Figure~\ref{fig:yesdist} shows the mechanism behind these numbers:
+judged equivalence decays with embedding distance, and the shape of
+the decay differs across datasets. MOSS falls from
 74.5\% YES in its nearest distance decile to 2.4\% in its farthest.
-QQP simply has no near-duplicate regime: its nearest decile already
-sits at median $L_2^2 = 0.34$ and only 16.2\% YES. LMSYS is the
-starkest case: even its nearest decile (median $L_2^2 = 0.10$) yields
+QQP has no near-duplicate regime at all: its nearest decile already
+sits at median $L_2^2 = 0.34$ with only 16.2\% YES. LMSYS is the
+starkest case. Even its nearest decile (median $L_2^2 = 0.10$) yields
 only 8.9\% YES, with mid-range deciles at 3--5\%. Manual inspection
 attributes this to MiniLM saturating on long templated prompts:
 pairs at near-zero distance share an instruction template
 (e.g., ``You are the text completion model\ldots'') but differ in the
 payload the template wraps, and the judge correctly rejects them.
-Near-zero embedding distance is not equivalence.
+Near-zero embedding distance therefore does not guarantee equivalence.
 
 The verdicts are stable across judge runtimes. On the 1{,}931-pair
 overlap between the local Ollama judge and Groq's hosted
@@ -499,7 +506,7 @@ Across all semantic runs (3 seeds $\times$ cache sizes 10\%, 20\%, 30\%), the me
 \end{figure}
 
 \subsection{Cache-Content Density Characterization}
-To locate where the redundancy signal dies, we profile density over the
+To locate where the redundancy signal vanishes, we profile density over the
 \emph{cache contents} rather than the workload: at periodic snapshots of the
 reference LRU cache during the stream ($10\%$ capacity, MiniLM), we measure
 the mean fraction of cached entries within $L_2^2$ distance $\theta$ of each
@@ -508,12 +515,12 @@ cached entry.
 Figure~\ref{fig:density} shows the result. At the eviction threshold
 $\theta = 0.90$, cache-content density orders QQP $<$ LMSYS $<$ MOSS
 ($2.1\times10^{-5}$, $4.1\times10^{-4}$, $2.5\times10^{-3}$ at the final
-checkpoint); at $\theta = 0.30$ QQP's cache density falls to zero. This
-inverts the workload-level expectation: QQP, built from duplicate-question
-pairs, is the most redundant \emph{workload}---it shows the largest LFU--LRU
-frequency payoff ($+2.49$pp, versus $+1.47$pp for LMSYS and $+0.00$pp for
-saturated MOSS)---yet its cache \emph{contents} are the sparsest, $20\times$
-below LMSYS and two orders of magnitude below MOSS.
+checkpoint); at $\theta = 0.30$, QQP's cache density falls to zero. This
+inverts the workload-level expectation. QQP, built from duplicate-question
+pairs, is the most redundant \emph{workload}, and it shows the largest
+LFU--LRU frequency payoff ($+2.49$pp, versus $+1.47$pp for LMSYS and
+$+0.00$pp for saturated MOSS). Yet its cache \emph{contents} are the
+sparsest, $20\times$ below LMSYS and two orders of magnitude below MOSS.
 
 The mechanism is self-deduplication. A query within $\theta$ of a cached
 entry is a hit and is never inserted, so the cache accumulates precisely the
@@ -545,6 +552,7 @@ When $r(e) = 0$, the numerator of our scoring function collapses to the smoothin
 Because $\mu$ is a constant, the cache entries are ranked entirely by inverse-utility. The semantic policy then behaves exactly like a slightly heavier LFU/LRU hybrid.
 
 \subsection{The Necessity of $\mu$-Smoothing}
+\label{sec:mu}
 While $\mu$-smoothing caused the policy to degrade to LFU, this degradation is a necessary safeguard. Without $\mu$ (i.e., $\mu=0$), any entry with no neighbors ($r(e)=0$) would receive a score of exactly 0. This entry would become ``immortal,'' permanently occupying a cache slot regardless of how rarely it is accessed. $\mu$ ensures the cache remains functional and degrades gracefully to a proven baseline when the semantic signal fails.
 
 \subsection{Workload Dependency and Applicability Boundaries}
@@ -554,28 +562,28 @@ The negative result on LMSYS-Chat-1M does not imply that semantic eviction is un
 Clustered workloads where semantic eviction is likely to dominate include: repetitive corporate FAQ systems, automated homework or coding assessment platforms, and domain-specific RAG pipelines with constrained query vocabularies. General-purpose conversational AI deployments should use LFU.
 
 \subsection{What Quality Adjustment Means for the Negative Result}
-The judge results sharpen the negative result in two directions.
-First, eviction policies are not merely tied on raw hit rate; they are
-tied on the metric that matters, since no policy's judged-equivalence
+The judge results strengthen the negative result in two ways.
+First, the eviction policies are tied not only on raw hit rate but
+also on judged equivalence, since no policy's judged-equivalence
 fraction separates from the others beyond binomial noise. Second, the
 raw hit rates the policies were competing over are largely illusory:
 at the 0.90 threshold, roughly 96--97\% of LMSYS and QQP hits would
-return an answer to a different question. The operative lever in a
-semantic cache is therefore not \emph{which entry to evict} but
-\emph{which matches to accept} --- the hit threshold and the quality of
-the match signal dominate any eviction decision made downstream of
-them. This also closes the loop on the router's quality proxy: the
+return an answer to a different question. The decisive design choice
+in a semantic cache is therefore admission rather than eviction. The
+hit threshold and the quality of the match signal determine how much
+value the cache can deliver before any eviction decision is made.
+This finding also bears on the router's quality proxy. The
 router scores hits by cosine similarity ($1 - d^2/2$), yet the
 templated-prompt failure shows that cosine similarity can approach 1.0
-on pairs a judge deems non-equivalent, so similarity-as-quality is
-itself an unreliable objective on boilerplate-heavy text.
+on pairs a judge deems non-equivalent, so similarity is an unreliable
+stand-in for answer quality on boilerplate-heavy text.
 
 \section{Limitations}
 
 This study has five primary limitations. First, both embedding models are compact sentence encoders (\texttt{all-MiniLM-L6-v2}, 384 dimensions; \texttt{gte-base}, 768 dimensions). The cross-encoder replication shows the policy ordering is robust, but larger embedding models may produce different distance geometry, and our own results show that absolute hit rates do not transfer across encoders. Second, the three datasets, while spanning diverse and redundant workloads, are all English-language chatbot or question corpora; results may not generalize to specialized workloads such as code or domain-specific RAG. Third, latency benchmarks were conducted on CPU-only hardware; GPU-accelerated serving infrastructure may shift the relative overhead of semantic eviction. Fourth, multi-turn conversation context was excluded from the cache key, treating each turn as independent; context-aware caching may yield different hit-rate characteristics. Fifth, the judge itself is an 8B-parameter model and may misjudge subtle equivalences, although the near-identical verdicts from an independent hosted runtime ($\kappa = 0.826$) indicate the findings are not an artifact of one deployment. Query equivalence is likewise a proxy for the quantity we ultimately care about, response reusability: a non-equivalent query pair can occasionally share a serviceable answer. Finally, the judged sample covers the seed-42 MiniLM runs at 10\% cache capacity only, so the quality-adjusted rates are point estimates for one operating configuration rather than seed-averaged quantities.
 
 \section{Conclusion}
-We presented CLEVER, a framework for evaluating semantic caching architectures for Large Language Models. While HNSW indexing and adaptive cost-based routing provide significant, measurable benefits to latency and LLM serving costs, we demonstrate that semantic-aware cache eviction is highly dependent on workload distribution. On diverse, real-world conversational datasets like LMSYS-Chat-1M, the semantic redundancy graph is too sparse to provide actionable signal. This conclusion survives every escalation we applied: six policies, three workloads, three capacities, and two embedding encoders. LFU is never beaten; ARC converges to LFU's decisions; SISO, designed specifically for LLM serving, is the worst policy on both sparse workloads; and every policy gap shrinks monotonically as capacity grows. The LLM-judge audit goes further: most raw hits at the standard threshold are not semantically equivalent queries, so the hit rates the policies compete over are largely illusory, and quality adjustment erases the residual differences between them. The binding constraint in semantic caching is hit quality --- the threshold and the match signal --- not eviction. Practitioners should pair LFU with per-encoder threshold calibration and judged spot-checks of hit quality rather than invest in semantically informed eviction. Future work should investigate whether combinatorial or bandit-based semantic eviction \cite{liu2026semantic} can overcome sparsity limits through online adaptation, and whether response-grounded judging on workloads with stored responses corroborates the query-equivalence audit.
+We presented CLEVER, a framework for evaluating semantic caching architectures for Large Language Models. While HNSW indexing and adaptive cost-based routing provide significant, measurable benefits to latency and LLM serving costs, we demonstrate that semantic-aware cache eviction is highly dependent on workload distribution. On diverse, real-world conversational datasets like LMSYS-Chat-1M, the semantic redundancy graph is too sparse to provide actionable signal. This conclusion held under every extension we tested: six policies, three workloads, three capacities, and two embedding encoders. No policy outperforms LFU; ARC converges to LFU's decisions; SISO, designed specifically for LLM serving, is the worst policy on both sparse workloads; and every policy gap shrinks monotonically as capacity grows. The LLM-judge audit adds a second, independent argument: most raw hits at the standard threshold are not semantically equivalent queries, so the hit rates the policies compete over are largely illusory, and quality adjustment erases the residual differences between them. What limits a semantic cache is the quality of its hits, set by the threshold and the match signal, rather than its eviction policy. Practitioners should pair LFU with per-encoder threshold calibration and judged spot-checks of hit quality rather than invest in semantically informed eviction. Future work should investigate whether combinatorial or bandit-based semantic eviction \cite{liu2026semantic} can overcome sparsity limits through online adaptation, and whether response-grounded judging on workloads with stored responses corroborates the query-equivalence audit.
 \section{Reproducibility and Artifact Availability}
 All code, configuration files, and raw result artifacts used in this paper are included in the accompanying project repository. Core quantitative claims map directly to result files under \texttt{results/benchmarks/}, \texttt{results/routing/}, and \texttt{results/eviction/}. Runtime manifests record command lines, software versions, hardware metadata, and Git commit information to support replication.
 
@@ -583,7 +591,7 @@ All code, configuration files, and raw result artifacts used in this paper are i
 This work uses the publicly released LMSYS-Chat-1M, Quora Question Pairs, and MOSS datasets and does not involve new human-subject data collection. We evaluate systems-level cache behavior rather than user-level profiling, and report aggregate metrics only. The LLM judge runs locally on open-weight models; no query content was sent to third-party services beyond a rate-limited validation subset.
 
 \section*{Acknowledgments}
-This project was conducted as part of CSE 584 (Advanced Database Systems) at the University of Michigan. We thank the LMSYS dataset creators and the Great Lakes HPC infrastructure used for large-scale eviction experiments.
+This project was conducted as part of CSE 584 (Advanced Database Systems) at the University of Michigan. We thank Professor Lin Ma for his guidance and feedback throughout the course and this project. We also thank the creators of the LMSYS-Chat-1M, Quora Question Pairs, and MOSS datasets, and acknowledge the University of Michigan Great Lakes HPC cluster, which ran the large-scale eviction experiments.
 \vspace{-0.3cm}
 \balance
 \bibliographystyle{plain}
