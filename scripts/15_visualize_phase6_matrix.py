@@ -67,13 +67,24 @@ ENCODERS = [
     ("gte", "phase6_recal", "gte", "gte-base (768d)"),
 ]
 
-POLICY_ORDER = ["lru", "lfu", "semantic", "arc", "gdsf", "siso"]
+# Policies whose runs live in their own result dirs rather than in the
+# Phase 6 cells, keyed by the dir prefix that carries them. FIFO was added
+# after the matrix had already been run, so re-running the other six purely
+# to co-locate it would waste allocation. These are merged into the matching
+# matrix cell at load time and are optional: the figures still render before
+# the overlay job lands.
+OVERLAY_PREFIXES = ["phase10_fifo"]
+
+POLICY_ORDER = ["fifo", "lru", "lfu", "semantic", "arc", "gdsf", "siso"]
 POLICY_LABELS = {
-    "lru": "LRU", "lfu": "LFU", "semantic": "Semantic",
+    "fifo": "FIFO", "lru": "LRU", "lfu": "LFU", "semantic": "Semantic",
     "arc": "ARC", "gdsf": "GDSF", "siso": "SISO",
 }
-# Okabe-Ito colorblind-safe palette (6 distinct).
+# Okabe-Ito colorblind-safe palette (7 distinct). FIFO takes black as the
+# weakest-baseline control; Okabe-Ito's remaining hue (#F0E442 yellow) is
+# too light to read on white.
 POLICY_COLORS = {
+    "fifo": "#000000",      # black
     "lru": "#0072B2",       # blue
     "lfu": "#E69F00",       # orange
     "semantic": "#009E73",  # green
@@ -82,7 +93,7 @@ POLICY_COLORS = {
     "siso": "#D55E00",      # vermillion
 }
 POLICY_MARKERS = {
-    "lru": "o", "lfu": "s", "semantic": "^",
+    "fifo": "P", "lru": "o", "lfu": "s", "semantic": "^",
     "arc": "D", "gdsf": "v", "siso": "X",
 }
 
@@ -124,36 +135,76 @@ def cell_path(eviction_dir: Path, prefix: str, ds: str, tag: str, cache: int) ->
             / "eviction_results_multi_seed.json")
 
 
+def _merge_cell(cell: dict, path: Path, cache: int):
+    """Merge one results file's policies into a cell, without overwriting.
+
+    A policy already present from an earlier (higher-priority) source wins,
+    so an overlay can only add policies the primary run did not carry.
+    """
+    data = json.loads(path.read_text())
+    agg = data["aggregated"]
+    for policy in POLICY_ORDER:
+        if cache in cell[policy]:
+            continue
+        pol_block = agg.get(policy, {})
+        if not pol_block:
+            continue
+        # Robust: take the single cache key actually present per policy.
+        only_key = next(iter(pol_block))
+        v = pol_block[only_key]
+        cell[policy][cache] = (v["hit_rate_mean"], v["hit_rate_std"])
+
+
 def load_matrix(eviction_dir: Path) -> dict:
     """Load the full Phase 6 matrix into nested dicts.
 
-    Returns matrix[encoder][dataset][policy][cache_pct] = (mean, std), plus
-    a parallel `missing` list of paths that were expected but absent.
+    Returns matrix[encoder][dataset][policy][cache_pct] = (mean, std), a
+    `missing` list of required cell paths that were absent, and an
+    `overlay_missing` list of optional overlay paths (see OVERLAY_PREFIXES)
+    that were absent. Overlay absence is reported rather than swallowed so a
+    partially covered matrix is never mistaken for a complete one.
     """
     matrix: dict = {}
     missing: list[Path] = []
+    overlay_missing: list[Path] = []
     for enc_key, prefix, tag, _label in ENCODERS:
         matrix[enc_key] = {}
         for ds in DATASET_ORDER:
-            matrix[enc_key][ds] = {p: {} for p in POLICY_ORDER}
+            cell = {p: {} for p in POLICY_ORDER}
+            matrix[enc_key][ds] = cell
             for cache in CACHE_SIZES:
                 path = cell_path(eviction_dir, prefix, ds, tag, cache)
-                if not path.exists():
+                if path.exists():
+                    _merge_cell(cell, path, cache)
+                else:
                     missing.append(path)
-                    continue
-                data = json.loads(path.read_text())
-                agg = data["aggregated"]
-                # Robust: take the single cache key actually present per policy.
-                for policy in POLICY_ORDER:
-                    pol_block = agg.get(policy, {})
-                    if not pol_block:
-                        continue
-                    only_key = next(iter(pol_block))
-                    v = pol_block[only_key]
-                    matrix[enc_key][ds][policy][cache] = (
-                        v["hit_rate_mean"], v["hit_rate_std"],
-                    )
-    return {"matrix": matrix, "missing": missing}
+                for overlay in OVERLAY_PREFIXES:
+                    opath = cell_path(eviction_dir, overlay, ds, tag, cache)
+                    if opath.exists():
+                        _merge_cell(cell, opath, cache)
+                    else:
+                        overlay_missing.append(opath)
+    return {
+        "matrix": matrix,
+        "missing": missing,
+        "overlay_missing": overlay_missing,
+    }
+
+
+def present_policies(matrix: dict) -> list[str]:
+    """POLICY_ORDER restricted to policies with data in at least one cell.
+
+    Keeps a policy whose overlay job has not landed yet out of the figures
+    entirely, rather than drawing it as an empty row.
+    """
+    return [
+        policy for policy in POLICY_ORDER
+        if any(
+            matrix[enc_key][ds][policy]
+            for enc_key, _prefix, _tag, _label in ENCODERS
+            for ds in DATASET_ORDER
+        )
+    ]
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -194,7 +245,8 @@ def plot_cache_size_ablation(matrix: dict, output_dir: Path):
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(
-        handles, labels, loc="lower center", ncol=6, frameon=False,
+        handles, labels, loc="lower center", ncol=len(labels) or 6,
+        frameon=False,
         bbox_to_anchor=(0.5, -0.02), columnspacing=1.4, handlelength=1.8,
     )
     fig.tight_layout(rect=(0, 0.04, 1, 1))
@@ -206,6 +258,7 @@ def plot_cache_size_ablation(matrix: dict, output_dir: Path):
 # ═════════════════════════════════════════════════════════════════
 
 def plot_policy_heatmap(matrix: dict, output_dir: Path):
+    policies = present_policies(matrix)
     col_labels = [
         f"{DATASET_LABELS[ds]}\n{cs}%"
         for ds in DATASET_ORDER for cs in CACHE_SIZES
@@ -218,8 +271,8 @@ def plot_policy_heatmap(matrix: dict, output_dir: Path):
 
     for r, (enc_key, _prefix, _tag, enc_label) in enumerate(ENCODERS):
         ax = axes[r][0]
-        grid = np.full((len(POLICY_ORDER), len(col_keys)), np.nan)
-        for i, policy in enumerate(POLICY_ORDER):
+        grid = np.full((len(policies), len(col_keys)), np.nan)
+        for i, policy in enumerate(policies):
             for j, (ds, cs) in enumerate(col_keys):
                 pt = matrix[enc_key][ds][policy].get(cs)
                 if pt is not None:
@@ -237,13 +290,13 @@ def plot_policy_heatmap(matrix: dict, output_dir: Path):
         ax.imshow(norm_grid, aspect="auto", cmap="YlGnBu", vmin=0, vmax=1)
         ax.set_xticks(range(len(col_keys)))
         ax.set_xticklabels(col_labels, fontsize=7)
-        ax.set_yticks(range(len(POLICY_ORDER)))
-        ax.set_yticklabels([POLICY_LABELS[p] for p in POLICY_ORDER])
+        ax.set_yticks(range(len(policies)))
+        ax.set_yticklabels([POLICY_LABELS[p] for p in policies])
         ax.set_title(f"{enc_label}", loc="left", fontsize=9, fontweight="bold")
         ax.grid(False)
 
         # Annotate each cell with the absolute hit-rate %.
-        for i in range(len(POLICY_ORDER)):
+        for i in range(len(policies)):
             for j in range(len(col_keys)):
                 if np.isnan(grid[i, j]):
                     continue
@@ -297,6 +350,18 @@ def main():
         for p in loaded["missing"]:
             logger.error(f"  missing input: {p}")
         sys.exit(1)
+
+    # Overlay cells are optional, but their absence must be stated: a figure
+    # silently drawn without FIFO reads as "FIFO was covered" when it wasn't.
+    if loaded["overlay_missing"]:
+        omitted = [p for p in POLICY_ORDER
+                   if p not in present_policies(loaded["matrix"])]
+        logger.warning(
+            f"{len(loaded['overlay_missing'])} overlay cell(s) absent; "
+            f"policies omitted from figures: {omitted or 'none'}"
+        )
+        for p in loaded["overlay_missing"]:
+            logger.warning(f"  absent overlay cell: {p}")
     matrix = loaded["matrix"]
 
     if args.figures in ("c", "all"):
