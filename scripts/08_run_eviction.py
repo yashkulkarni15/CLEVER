@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data.paths import embeddings_file, queries_file
 from src.cache.semantic_cache import SemanticCache
+from src.cache.eviction.fifo import FIFOPolicy
 from src.cache.eviction.lru import LRUPolicy
 from src.cache.eviction.lfu import LFUPolicy
 from src.cache.eviction.semantic import SemanticPolicy
@@ -110,8 +111,9 @@ def create_policy(
     """Create an eviction policy instance from config.
 
     Args:
-        policy_name: One of 'lru', 'lfu', 'semantic', 'adaptive_hard',
-            'adaptive_blend', 'arc', 'gdsf', 'siso', 'oracle'.
+        policy_name: One of 'fifo', 'lru', 'lfu', 'semantic',
+            'adaptive_hard', 'adaptive_blend', 'arc', 'gdsf', 'siso',
+            'oracle'.
         config: Full experiment config dict.
         cache_embs: Initial cache embeddings (for oracle pre-computation).
         cache_ids: Initial cache IDs.
@@ -121,7 +123,9 @@ def create_policy(
     """
     eviction_cfg = config.get("eviction", {})
 
-    if policy_name == "lru":
+    if policy_name == "fifo":
+        return FIFOPolicy()
+    elif policy_name == "lru":
         return LRUPolicy()
     elif policy_name == "lfu":
         return LFUPolicy()

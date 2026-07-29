@@ -3,6 +3,7 @@ Eviction policy implementations for the semantic cache.
 
 Available policies:
 
+- ``FIFOPolicy``     — First In First Out (baseline)
 - ``LRUPolicy``      — Least Recently Used (baseline)
 - ``LFUPolicy``      — Least Frequently Used (baseline)
 - ``SemanticPolicy``  — Semantic-aware (novel contribution)
@@ -15,6 +16,7 @@ Available policies:
 """
 
 from src.cache.eviction.base import EvictionPolicy
+from src.cache.eviction.fifo import FIFOPolicy
 from src.cache.eviction.lru import LRUPolicy
 from src.cache.eviction.lfu import LFUPolicy
 from src.cache.eviction.semantic import SemanticPolicy
@@ -25,6 +27,7 @@ from src.cache.eviction.siso import SISOPolicy
 from src.cache.eviction.oracle import OraclePolicy
 
 POLICY_REGISTRY: dict[str, type[EvictionPolicy]] = {
+    "fifo": FIFOPolicy,
     "lru": LRUPolicy,
     "lfu": LFUPolicy,
     "semantic": SemanticPolicy,
@@ -38,6 +41,7 @@ POLICY_REGISTRY: dict[str, type[EvictionPolicy]] = {
 
 __all__ = [
     "EvictionPolicy",
+    "FIFOPolicy",
     "LRUPolicy",
     "LFUPolicy",
     "SemanticPolicy",
